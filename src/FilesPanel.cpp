@@ -1,16 +1,17 @@
 #include "FilesPanel.h"
 
+#include "TextFileEditor.h"
+
 #include <QDir>
-#include <QFile>
+#include <QFileInfo>
 #include <QFileSystemModel>
-#include <QFontDatabase>
 #include <QHeaderView>
 #include <QItemSelectionModel>
 #include <QLabel>
-#include <QPlainTextEdit>
+#include <QScopedValueRollback>
 #include <QSortFilterProxyModel>
 #include <QSplitter>
-#include <QStringDecoder>
+#include <QTextDocument>
 #include <QTreeView>
 #include <QVBoxLayout>
 
@@ -36,7 +37,7 @@ FilesPanel::FilesPanel(const QString &root, QWidget *parent)
     , root_(root)
     , path_(new QLabel(this))
     , tree_(new QTreeView(this))
-    , preview_(new QPlainTextEdit(this))
+    , editor_(new TextFileEditor(this))
 {
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(8, 8, 8, 8);
@@ -61,26 +62,36 @@ FilesPanel::FilesPanel(const QString &root, QWidget *parent)
     path_->hide();
     detailLayout->addWidget(path_);
 
-    preview_->setObjectName("filePreview");
-    preview_->setAccessibleName(tr("File preview"));
-    preview_->setReadOnly(true);
-    preview_->setUndoRedoEnabled(false);
-    preview_->setLineWrapMode(QPlainTextEdit::NoWrap);
-    preview_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    preview_->setPlaceholderText(tr("Select a file to preview."));
-    detailLayout->addWidget(preview_, 1);
+    editor_->setObjectName("fileEditor");
+    editor_->setAccessibleName(tr("File editor"));
+    editor_->clearFile(tr("Select a file to open."));
+    connect(editor_->document(), &QTextDocument::modificationChanged, this, &FilesPanel::updatePath);
+    detailLayout->addWidget(editor_, 1);
     split->addWidget(details);
     split->setSizes({280, 720});
     split->setStretchFactor(1, 1);
 }
 
+bool FilesPanel::confirmClose()
+{
+    return editor_->confirmClose();
+}
+
+bool FilesPanel::save()
+{
+    return editor_->save();
+}
+
 void FilesPanel::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
-    if (model_)
+    if (model_) {
+        editor_->reloadIfClean();
+        updatePath();
         return;
+    }
     if (!QFileInfo(root_).isDir()) {
-        preview_->setPlaceholderText(tr("The project folder is unavailable."));
+        editor_->clearFile(tr("The project folder is unavailable."));
         return;
     }
 
@@ -89,48 +100,71 @@ void FilesPanel::showEvent(QShowEvent *event)
     model_->setOption(QFileSystemModel::DontUseCustomDirectoryIcons);
     auto *files = new ProjectFiles(this);
     files->setSourceModel(model_);
+    // The view can select a neighboring row as the model removes the open file.
+    const auto beginModelChange = [this] { ++modelChanges_; };
+    connect(files, &QAbstractItemModel::rowsAboutToBeRemoved, this, beginModelChange);
+    connect(files, &QAbstractItemModel::modelAboutToBeReset, this, beginModelChange);
     tree_->setModel(files);
+    const auto endModelChange = [this] {
+        if (!openedIndex_.isValid() && !openedPath_.isEmpty())
+            tree_->selectionModel()->clear();
+        --modelChanges_;
+    };
+    connect(files, &QAbstractItemModel::rowsRemoved, this, endModelChange);
+    connect(files, &QAbstractItemModel::modelReset, this, endModelChange);
     tree_->setRootIndex(files->mapFromSource(model_->setRootPath(root_)));
     for (int column = 1; column < files->columnCount(); ++column)
         tree_->hideColumn(column);
     tree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-    connect(tree_->selectionModel(), &QItemSelectionModel::currentChanged, this,
-            [this, files](const QModelIndex &index) { showPreview(files->mapToSource(index)); });
+    connect(tree_->selectionModel(), &QItemSelectionModel::currentChanged, this, &FilesPanel::openSelection);
 }
 
-void FilesPanel::showPreview(const QModelIndex &index)
+void FilesPanel::openSelection(const QModelIndex &index)
 {
-    preview_->clear();
-    const auto info = model_->fileInfo(index);
-    const auto relative = QDir(root_).relativeFilePath(info.filePath());
-    path_->setVisible(index.isValid());
-    path_->setText(relative);
-    path_->setToolTip(relative);
-    if (!info.isFile()) {
-        preview_->setPlaceholderText(tr("Select a file to preview."));
+    if (!index.isValid() || modelChanges_ || changingSelection_)
+        return;
+
+    const QScopedValueRollback guard(changingSelection_, true);
+    const QPersistentModelIndex requested(index);
+    const auto *proxy = static_cast<const QSortFilterProxyModel *>(tree_->model());
+    auto info = model_->fileInfo(proxy->mapToSource(requested));
+    if (info.filePath() == openedPath_) {
+        openedIndex_ = requested;
+        editor_->reloadIfClean();
+        updatePath();
+        return;
+    }
+    if (!confirmClose() || !requested.isValid()) {
+        if (openedIndex_.isValid())
+            tree_->setCurrentIndex(openedIndex_);
+        else
+            tree_->selectionModel()->clear();
         return;
     }
 
-    QFile file(info.filePath());
-    if (!file.open(QIODevice::ReadOnly)) {
-        preview_->setPlaceholderText(tr("Could not read this file."));
-        return;
+    info = model_->fileInfo(proxy->mapToSource(requested));
+    openedIndex_ = requested;
+    openedPath_ = info.filePath();
+    relativePath_ = QDir(root_).relativeFilePath(openedPath_);
+    if (info.isFile())
+        editor_->openFile(openedPath_, previewLimit);
+    else
+        editor_->clearFile(tr("Select a file to open."));
+    updatePath();
+}
+
+void FilesPanel::updatePath()
+{
+    path_->setVisible(!relativePath_.isEmpty());
+    QString title = relativePath_;
+    if (editor_->document()->isModified())
+        title += QStringLiteral(" *");
+    else if (editor_->isReadOnly() && !editor_->document()->isEmpty()) {
+        if (QFileInfo(openedPath_).size() > previewLimit)
+            title = tr("%1  ·  First 256 KiB").arg(title);
+        else
+            title = tr("%1  ·  Read only").arg(title);
     }
-    const QByteArray bytes = file.read(previewLimit + 1);
-    if (file.error() != QFileDevice::NoError) {
-        preview_->setPlaceholderText(tr("Could not read this file."));
-        return;
-    }
-    const bool truncated = bytes.size() > previewLimit;
-    auto decoder = QStringDecoder(QStringDecoder::Utf8);
-    const auto sample = QByteArrayView(bytes).first(qMin(bytes.size(), previewLimit));
-    QString text = decoder(sample);
-    if (bytes.contains('\0') || decoder.hasError()) {
-        preview_->setPlaceholderText(tr("Preview is available for UTF-8 text files."));
-        return;
-    }
-    preview_->setPlaceholderText(tr("Empty file"));
-    if (truncated)
-        path_->setText(tr("%1  ·  First 256 KiB").arg(relative));
-    preview_->setPlainText(text);
+    path_->setText(title);
+    path_->setToolTip(relativePath_);
 }

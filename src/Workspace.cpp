@@ -7,6 +7,7 @@
 #include "GitPanel.h"
 #include "RunConfigurations.h"
 #include "Terminal.h"
+#include "TextFileEditor.h"
 
 #include <QAction>
 #include <QApplication>
@@ -35,6 +36,7 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QScrollBar>
+#include <QShortcut>
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -318,7 +320,7 @@ public:
         split_->setChildrenCollapsible(false);
         split_->setHandleWidth(8);
         layout->addWidget(split_, 1);
-        auto *views = new QTabWidget(split_);
+        auto *views = views_ = new QTabWidget(split_);
         views->setObjectName("projectViews");
         views->setDocumentMode(true);
         views->tabBar()->setDrawBase(false);
@@ -327,7 +329,7 @@ public:
         views->addTab(currentChanges, tr("Current Changes"));
         auto *git = new GitPanel(root, views);
         views->addTab(git, tr("Commits"));
-        auto *files = new FilesPanel(root, views);
+        auto *files = files_ = new FilesPanel(root, views);
         views->addTab(files, tr("Files"));
         views->setTabsClosable(true);
         for (int tab = 0; tab < views->count(); ++tab) {
@@ -351,6 +353,8 @@ public:
                     views->setCurrentWidget(existing);
                     return;
                 }
+                if (!CommitDiffView::confirmClose(existing))
+                    return;
                 views->removeTab(index);
                 existing->deleteLater();
             }
@@ -372,8 +376,18 @@ public:
             if (tab <= views->indexOf(files))
                 return;
             auto *page = views->widget(tab);
+            if (!CommitDiffView::confirmClose(page))
+                return;
             views->removeTab(tab);
             page->deleteLater();
+        });
+        auto *saveShortcut = new QShortcut(QKeySequence::Save, views);
+        saveShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(saveShortcut, &QShortcut::activated, views, [views, files] {
+            if (views->currentWidget() == files)
+                files->save();
+            else if (auto *editor = CommitDiffView::workingEditor(views->currentWidget()))
+                editor->save();
         });
         split_->addWidget(views);
 
@@ -491,6 +505,11 @@ public:
 
     RunConfigurations *runConfigurations() const { return runs_; }
 
+    bool confirmClose()
+    {
+        return files_->confirmClose() && CommitDiffView::confirmClose(views_->widget(views_->indexOf(files_) + 1));
+    }
+
     QJsonObject saveState() const
     {
         QJsonArray tabs;
@@ -520,6 +539,9 @@ public:
     }
 
 private:
+    QTabWidget *views_ = nullptr;
+    FilesPanel *files_ = nullptr;
+
     static Terminal *terminalIn(const QWidget *page)
     {
         const auto *item = page->layout()->itemAt(0);
@@ -874,6 +896,8 @@ void Workspace::removeProject(int tab)
 {
     const int index = tabs_->tabData(tab).toInt();
     const auto project = projects_.at(index);
+    if (project.view && !project.view->confirmClose())
+        return;
     auto *runs = project.view ? project.view->runConfigurations() : nullptr;
     const auto runState = runs ? runs->saveState() : project.state.value("runConfigurations").toObject();
     if (!runState.value("configurations").toArray().isEmpty()) {
@@ -954,6 +978,12 @@ void Workspace::updateSessionStatus(bool saved)
 
 void Workspace::closeEvent(QCloseEvent *event)
 {
+    for (const auto &project : std::as_const(projects_)) {
+        if (project.view && !project.view->confirmClose()) {
+            event->ignore();
+            return;
+        }
+    }
     if (!saveSession()) {
         const auto decision = QMessageBox::warning(this, tr("Workspace Save Failed"),
             tr("Could not save the workspace to %1. Close anyway?").arg(sessionFile()),

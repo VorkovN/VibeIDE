@@ -48,6 +48,8 @@ public:
     void loadPreview(const File &file);
     void loadWorkingFiles();
     void loadWorkingPreview(const File &file);
+    void compareWorkingText(Preview preview);
+    const QString &workingRoot() const { return workingRoot_; }
 
 signals:
     void filesReady(const QList<File> &files);

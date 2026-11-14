@@ -508,6 +508,7 @@ void CommitDiffSource::loadWorkingBefore(const File &file, Preview preview, bool
 
 void CommitDiffSource::compareWorking(Preview preview, bool beforeExists, bool afterExists)
 {
+    cancel();
     if (!beforeExists || !afterExists) {
         addWholeFileHunk(preview);
         emit previewReady(preview);
@@ -529,6 +530,11 @@ void CommitDiffSource::compareWorking(Preview preview, bool beforeExists, bool a
     run(std::move(arguments), PatchLimit, [this, snapshots, preview = std::move(preview)](Result result) mutable {
         finishComparison(std::move(preview), std::move(result));
     }, snapshots->path(), true);
+}
+
+void CommitDiffSource::compareWorkingText(Preview preview)
+{
+    compareWorking(std::move(preview), true, true);
 }
 
 void CommitDiffSource::loadAfter(const File &file, Preview preview)

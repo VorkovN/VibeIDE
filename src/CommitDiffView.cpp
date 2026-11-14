@@ -3,20 +3,24 @@
 #include "CommitDiffSource.h"
 #include "GitFileList.h"
 #include "GitStatus.h"
+#include "TextFileEditor.h"
 
 #include <QAction>
 #include <QComboBox>
+#include <QDir>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPainter>
-#include <QPlainTextEdit>
 #include <QScrollBar>
 #include <QScopedValueRollback>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QTextBlock>
+#include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -25,6 +29,9 @@
 #include <utility>
 
 namespace {
+constexpr qsizetype maxLines = 30'000;
+constexpr qsizetype workingFileLimit = 1024 * 1024;
+
 enum class Change { None, Added, Removed, Padding };
 
 struct Line {
@@ -34,13 +41,13 @@ struct Line {
     Change change = Change::None;
 };
 
-class DiffEditor final : public QPlainTextEdit
+class DiffEditor final : public TextFileEditor
 {
 public:
     enum Gutter { Before, After, Unified };
 
     DiffEditor(Gutter side, QWidget *parent)
-        : QPlainTextEdit(parent), side_(side), gutter_(new QWidget(this))
+        : TextFileEditor(parent), side_(side), gutter_(new QWidget(this))
     {
         setReadOnly(true);
         setUndoRedoEnabled(false);
@@ -50,24 +57,33 @@ public:
         setTabStopDistance(fontMetrics().horizontalAdvance(QLatin1Char(' ')) * 4);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
         connect(this, &QPlainTextEdit::updateRequest, gutter_, [this] { gutter_->update(); });
+        connect(this, &QPlainTextEdit::blockCountChanged, this, [this] {
+            if (fileDocument_)
+                updateNumberWidth(blockCount());
+        });
         gutter_->installEventFilter(this);
         updateGutter();
     }
 
-    void setLines(QList<Line> lines)
+    void setLines(QList<Line> lines, bool replaceDocument = true)
     {
         lines_ = std::move(lines);
-        QStringList text;
-        text.reserve(lines_.size());
-        int biggestNumber = 0;
-        for (const auto &line : lines_) {
-            text.append(line.text);
-            biggestNumber = std::max({biggestNumber, line.oldNumber, line.newNumber});
+        fileDocument_ = !replaceDocument;
+        if (replaceDocument) {
+            QStringList text;
+            text.reserve(lines_.size());
+            int biggestNumber = 0;
+            for (const auto &line : lines_) {
+                text.append(line.text);
+                biggestNumber = std::max({biggestNumber, line.oldNumber, line.newNumber});
+            }
+            setPlainText(text.join(QLatin1Char('\n')));
+            updateNumberWidth(biggestNumber);
+        } else {
+            updateNumberWidth(blockCount());
         }
-        digits_ = qMax(2, int(QString::number(biggestNumber).size()));
-        updateGutter();
-        setPlainText(text.join(QLatin1Char('\n')));
         updateHighlights();
+        gutter_->update();
     }
 
     int topLine() const { return firstVisibleBlock().blockNumber(); }
@@ -84,8 +100,8 @@ public:
 protected:
     void changeEvent(QEvent *event) override
     {
-        QPlainTextEdit::changeEvent(event);
-        if (event->type() == QEvent::PaletteChange) {
+        TextFileEditor::changeEvent(event);
+        if (event->type() == QEvent::PaletteChange || event->type() == QEvent::StyleChange) {
             updateHighlights();
             gutter_->update();
         }
@@ -97,12 +113,12 @@ protected:
             paintGutter();
             return true;
         }
-        return QPlainTextEdit::eventFilter(watched, event);
+        return TextFileEditor::eventFilter(watched, event);
     }
 
     void resizeEvent(QResizeEvent *event) override
     {
-        QPlainTextEdit::resizeEvent(event);
+        TextFileEditor::resizeEvent(event);
         updateGutter();
     }
 
@@ -141,6 +157,15 @@ private:
         return (digits_ + 1) * fontMetrics().horizontalAdvance(QLatin1Char('0')) + 6;
     }
 
+    void updateNumberWidth(int biggestNumber)
+    {
+        const int digits = qMax(2, int(QString::number(biggestNumber).size()));
+        if (digits_ != digits) {
+            digits_ = digits;
+            updateGutter();
+        }
+    }
+
     void updateGutter()
     {
         const int width = side_ == Unified ? 2 * numberWidth() + 17 : numberWidth() + 1;
@@ -156,14 +181,16 @@ private:
         const auto ink = palette().color(QPalette::PlaceholderText);
         const int width = numberWidth();
         int rowHeight = fontMetrics().height();
-        for (auto block = firstVisibleBlock(); block.isValid() && block.blockNumber() < lines_.size();
+        for (auto block = firstVisibleBlock();
+             block.isValid() && (fileDocument_ || block.blockNumber() < lines_.size());
              block = block.next()) {
             const auto bounds = blockBoundingGeometry(block).translated(contentOffset());
             const int top = qRound(bounds.top());
             if (top >= gutter_->height())
                 break;
             rowHeight = qMax(1, qRound(bounds.bottom()) - top);
-            const auto &line = lines_.at(block.blockNumber());
+            const int number = block.blockNumber();
+            const auto line = lines_.value(number);
             if (line.change != Change::None)
                 painter.fillRect(0, top, gutter_->width(), rowHeight, background(line.change));
             painter.setPen(ink);
@@ -175,7 +202,7 @@ private:
             if (side_ != After)
                 drawNumber(line.oldNumber, 0);
             if (side_ != Before)
-                drawNumber(line.newNumber, side_ == Unified ? width : 0);
+                drawNumber(fileDocument_ ? number + 1 : line.newNumber, side_ == Unified ? width : 0);
             if (side_ == Unified && (line.change == Change::Added || line.change == Change::Removed)) {
                 const bool added = line.change == Change::Added;
                 painter.setPen(palette().color(QPalette::Base).lightness() < 128
@@ -194,6 +221,7 @@ private:
     QWidget *gutter_;
     QList<Line> lines_;
     int digits_ = 2;
+    bool fileDocument_ = false;
 };
 
 QStringList fileLines(const QString &text)
@@ -212,6 +240,12 @@ QStringList fileLines(const QString &text)
         line.replace(QChar(0x2029), QChar(0x2424));
     }
     return lines;
+}
+
+QString comparisonText(QString text)
+{
+    text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    return text.replace(u'\r', u'\n');
 }
 
 struct Comparison {
@@ -274,6 +308,8 @@ bool compare(const QStringList &before, const QStringList &after,
 
 class DiffPage final : public QWidget
 {
+    Q_OBJECT
+
 public:
     DiffPage(QWidget *parent, const QString &repository, const QString &hash, const QString &subject,
              const QByteArray &workingPath = {})
@@ -348,25 +384,41 @@ public:
         split->setStretchFactor(1, 1);
         layout->addWidget(split, 1);
 
-        auto synchronize = [this](DiffEditor *from, DiffEditor *to) {
-            auto *target = to->verticalScrollBar();
-            connect(from->verticalScrollBar(), &QScrollBar::valueChanged, this, [this, target](int position) {
-                if (syncingScroll_)
-                    return;
-                // Qt uses the target scrollbar's signal to move its editor viewport.
-                const QScopedValueRollback guard(syncingScroll_, true);
-                target->setValue(position);
-            });
-        };
-        synchronize(before_, after_);
-        synchronize(after_, before_);
+        connect(before_->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int position) {
+            synchronizeScroll(after_, afterRows_.value(position, position));
+        });
+        connect(after_->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int position) {
+            synchronizeScroll(before_, beforeRows_.value(position, position));
+        });
         connect(mode_, &QComboBox::currentIndexChanged, this, [this](int index) {
             pages_->setCurrentIndex(index);
             if (currentChange_ >= 0)
                 goToChange(currentChange_);
         });
-        connect(files_, &QTreeWidget::currentItemChanged, this,
-                [this](QTreeWidgetItem *item) { if (item) showFile(item); });
+        connect(files_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *item, QTreeWidgetItem *previous) {
+            if (!item)
+                return;
+            if (auto *editor = workingEditor(); editor && !editor->confirmClose()) {
+                const QSignalBlocker blocked(files_);
+                files_->setCurrentItem(previous);
+                return;
+            }
+            showFile(item);
+        });
+
+        if (working_) {
+            compareEdited_.setSingleShot(true);
+            compareEdited_.setInterval(180);
+            connect(&compareEdited_, &QTimer::timeout, this, &DiffPage::compareWorkingEdit);
+            connect(after_, &QPlainTextEdit::textChanged, this, [this] {
+                if (!editingFile_ || updatingEditors_)
+                    return;
+                // Keep the document and its undo stack. Recompute only comparison metadata.
+                after_->setLines({}, false);
+                compareEdited_.start();
+            });
+            connect(after_->document(), &QTextDocument::modificationChanged, this, &DiffPage::updateFileLabel);
+        }
         connect(&source_, &CommitDiffSource::filesReady, this, [this, workingPath](const QList<CommitDiffSource::File> &files) {
             changedFiles_ = files;
             QTreeWidgetItem *requested = nullptr;
@@ -391,7 +443,8 @@ public:
         });
         connect(&source_, &CommitDiffSource::previewReady, this, &DiffPage::showPreview);
         connect(&source_, &CommitDiffSource::failed, this, [this](const QString &error) {
-            clearEditors();
+            if (!editingFile_)
+                clearEditors();
             status_->setText(error);
             status_->show();
         });
@@ -401,6 +454,23 @@ public:
             source_.loadWorkingFiles();
         else
             source_.loadFiles(hash);
+    }
+
+    TextFileEditor *workingEditor() const { return editingFile_ ? after_ : nullptr; }
+
+protected:
+    void showEvent(QShowEvent *event) override
+    {
+        QWidget::showEvent(event);
+        if (!editingFile_ || after_->document()->isModified())
+            return;
+        const auto previous = after_->editorText();
+        const QScopedValueRollback updating(updatingEditors_, true);
+        after_->reloadIfClean();
+        if (after_->isReadOnly() && files_->currentItem())
+            showFile(files_->currentItem());
+        else if (previous != after_->editorText())
+            compareEdited_.start();
     }
 
 private:
@@ -463,22 +533,29 @@ private:
 
     void clearEditors()
     {
+        editingFile_ = false;
+        compareEdited_.stop();
         currentChange_ = -1;
         alignedChanges_.clear();
         unifiedChanges_.clear();
-        for (auto *editor : {before_, after_, unified_})
+        beforeRows_.clear();
+        afterRows_.clear();
+        for (auto *editor : {before_, after_, unified_}) {
+            editor->clearFile();
+            editor->setUndoRedoEnabled(false);
             editor->setLines({});
+        }
         pages_->hide();
         mode_->setEnabled(false);
+        mode_->setToolTip({});
+        updateFileLabel();
         updateButtons();
     }
 
     void showFile(const QTreeWidgetItem *item)
     {
         const auto &file = changedFiles_.at(item->data(0, Qt::UserRole).toLongLong());
-        const auto paths = displayPath(file);
-        filePath_->setText(paths);
-        filePath_->setToolTip(paths);
+        displayedPath_ = displayPath(file);
         clearEditors();
         status_->setText(tr("Loading file versions…"));
         status_->show();
@@ -488,45 +565,154 @@ private:
             source_.loadPreview(file);
     }
 
+    void updateFileLabel()
+    {
+        const bool modified = editingFile_ && after_->document()->isModified();
+        filePath_->setText(modified ? displayedPath_ + QStringLiteral(" •") : displayedPath_);
+        filePath_->setToolTip(modified ? tr("%1\nUnsaved changes. Press %2 to save.")
+            .arg(displayedPath_, QKeySequence(QKeySequence::Save).toString(QKeySequence::NativeText))
+            : displayedPath_);
+    }
+
     void showPreview(const CommitDiffSource::Preview &preview)
     {
+        // If typing continued while Git was comparing snapshots, keep the newer buffer intact.
+        if (editingFile_ && !preview.unavailableReason.isEmpty() && comparisonText_ != after_->editorText())
+            return;
         if (!preview.unavailableReason.isEmpty()) {
             status_->setText(preview.unavailableReason);
+            status_->show();
             return;
         }
+        if (editingFile_ && preview.after != after_->editorText())
+            return;
         const auto before = fileLines(preview.before);
         const auto after = fileLines(preview.after);
-        constexpr int maxLines = 30000;
         if (before.size() + after.size() > maxLines) {
             status_->setText(tr("This file has too many lines to display."));
+            status_->show();
             return;
         }
         Comparison comparison;
         if (!compare(before, after, preview.hunks, comparison)) {
             status_->setText(tr("Could not align the two file versions."));
+            status_->show();
             return;
         }
+        const bool firstLoad = !editingFile_;
+        if (firstLoad)
+            prepareEditors(preview);
         alignedChanges_ = std::move(comparison.alignedChanges);
         unifiedChanges_ = std::move(comparison.unifiedChanges);
-        before_->setLines(std::move(comparison.before));
-        after_->setLines(std::move(comparison.after));
-        unified_->setLines(std::move(comparison.unified));
+        {
+            const QScopedValueRollback scrolling(syncingScroll_, true);
+            const int afterPosition = after_->verticalScrollBar()->value();
+            const int unifiedPosition = unified_->verticalScrollBar()->value();
+            if (editingFile_) {
+                QList<Line> actualLines;
+                beforeRows_.clear();
+                afterRows_.clear();
+                for (int row = 0; row < comparison.after.size(); ++row) {
+                    auto &line = comparison.after[row];
+                    afterRows_.append(int(actualLines.size()));
+                    if (line.newNumber > 0) {
+                        beforeRows_.append(row);
+                        actualLines.append(std::move(line));
+                    }
+                }
+                beforeRows_.append(int(comparison.before.size()));
+                after_->setLines(std::move(actualLines), false);
+            } else {
+                after_->setLines(std::move(comparison.after));
+            }
+            before_->setLines(std::move(comparison.before));
+            unified_->setLines(std::move(comparison.unified));
+            if (!firstLoad) {
+                before_->verticalScrollBar()->setValue(beforeRows_.value(afterPosition, afterPosition));
+                unified_->verticalScrollBar()->setValue(unifiedPosition);
+            }
+        }
         status_->setText(tr("No text changes"));
         status_->setVisible(alignedChanges_.isEmpty());
         pages_->show();
         mode_->setEnabled(true);
-        if (!alignedChanges_.isEmpty())
+        if (firstLoad && !alignedChanges_.isEmpty()) {
             goToChange(0);
-        else
+        } else {
+            currentChange_ = std::min(currentChange_, int(alignedChanges_.size()) - 1);
             updateButtons();
+        }
+    }
+
+    void prepareEditors(const CommitDiffSource::Preview &preview)
+    {
+        const auto &file = changedFiles_.at(files_->currentItem()->data(0, Qt::UserRole).toLongLong());
+        const auto oldPath = file.oldPath.isEmpty() ? file.workingPath : file.oldPath;
+        const auto newPath = file.newPath.isEmpty() ? file.workingPath : file.newPath;
+        before_->setSyntaxFileName(QString::fromUtf8(oldPath));
+        after_->setSyntaxFileName(QString::fromUtf8(newPath));
+        unified_->setSyntaxFileName(QString::fromUtf8(newPath.isEmpty() ? oldPath : newPath));
+        if (!working_ || file.workingPath.isEmpty())
+            return;
+
+        const auto relativePath = QString::fromUtf8(file.workingPath);
+        if (relativePath.toUtf8() != file.workingPath)
+            return;
+        const QDir worktree(source_.workingRoot());
+        const QString path = QDir::cleanPath(worktree.filePath(relativePath));
+        const QFileInfo info(path);
+        const QString pathInWorktree = worktree.relativeFilePath(path);
+        if (pathInWorktree != relativePath || relativePath.startsWith(QStringLiteral("../")) ||
+            QDir::isAbsolutePath(relativePath) || !info.isFile() || info.canonicalFilePath() != path)
+            return;
+        const QScopedValueRollback updating(updatingEditors_, true);
+        const auto expected = preview.after.isNull() ? QStringLiteral("") : preview.after;
+        const auto result = after_->openFile(path, workingFileLimit, expected);
+        if (result != TextFileEditor::LoadResult::Ready) {
+            after_->clearFile();
+            after_->setSyntaxFileName(QString::fromUtf8(newPath));
+            return;
+        }
+        editingFile_ = true;
+        workingBefore_ = comparisonText(preview.before);
+        after_->setUndoRedoEnabled(true);
+        after_->document()->setModified(false);
+        mode_->setToolTip(tr("Edit the working file in Side by Side mode."));
+        if (fileLines(after_->editorText()).size() != fileLines(preview.after).size())
+            compareEdited_.start();
+    }
+
+    void compareWorkingEdit()
+    {
+        CommitDiffSource::Preview preview;
+        preview.before = workingBefore_;
+        preview.after = after_->editorText();
+        comparisonText_ = preview.after;
+        if (preview.before.count(u'\n') + preview.after.count(u'\n') >= maxLines ||
+            preview.after.toUtf8().size() > workingFileLimit) {
+            status_->setText(tr("The edited file is too large to compare."));
+            status_->show();
+            return;
+        }
+        source_.compareWorkingText(std::move(preview));
+    }
+
+    void synchronizeScroll(DiffEditor *target, int position)
+    {
+        if (syncingScroll_)
+            return;
+        const QScopedValueRollback guard(syncingScroll_, true);
+        target->verticalScrollBar()->setValue(position);
     }
 
     void goToChange(int index)
     {
         currentChange_ = index;
         if (mode_->currentIndex() == 0) {
-            before_->jump(alignedChanges_.at(index));
-            after_->jump(alignedChanges_.at(index));
+            const QScopedValueRollback scrolling(syncingScroll_, true);
+            const int line = alignedChanges_.at(index);
+            before_->jump(line);
+            after_->jump(afterRows_.value(line, line));
         } else {
             unified_->jump(unifiedChanges_.at(index));
         }
@@ -536,7 +722,7 @@ private:
     void updateButtons()
     {
         previous_->setEnabled(currentChange_ > 0);
-        next_->setEnabled(currentChange_ >= 0 && currentChange_ + 1 < alignedChanges_.size());
+        next_->setEnabled(currentChange_ + 1 < alignedChanges_.size());
     }
 
     CommitDiffSource source_;
@@ -552,10 +738,18 @@ private:
     DiffEditor *before_ = nullptr;
     DiffEditor *after_ = nullptr;
     DiffEditor *unified_ = nullptr;
+    QString displayedPath_;
+    QString workingBefore_;
+    QString comparisonText_;
+    QTimer compareEdited_;
+    QList<int> beforeRows_;
+    QList<int> afterRows_;
     QList<int> alignedChanges_;
     QList<int> unifiedChanges_;
     int currentChange_ = -1;
     bool syncingScroll_ = false;
+    bool editingFile_ = false;
+    bool updatingEditors_ = false;
 };
 }
 
@@ -569,3 +763,17 @@ QWidget *CommitDiffView::createWorking(QWidget *parent, const QString &repositor
 {
     return new DiffPage(parent, repository, {}, {}, path);
 }
+
+TextFileEditor *CommitDiffView::workingEditor(QWidget *page)
+{
+    auto *diff = qobject_cast<DiffPage *>(page);
+    return diff ? diff->workingEditor() : nullptr;
+}
+
+bool CommitDiffView::confirmClose(QWidget *page)
+{
+    auto *editor = workingEditor(page);
+    return !editor || editor->confirmClose();
+}
+
+#include "CommitDiffView.moc"

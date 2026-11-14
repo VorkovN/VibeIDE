@@ -30,7 +30,9 @@ qt_add_executable(VibeIDE MACOSX_BUNDLE
     src/GitSquash.cpp
     src/Pty.cpp
     src/RunConfigurations.cpp
+    src/SyntaxHighlighting.cpp
     src/Terminal.cpp
+    src/TextFileEditor.cpp
     src/Workspace.cpp
 )
 target_link_libraries(VibeIDE PRIVATE Qt6::Widgets PkgConfig::VTerm)
