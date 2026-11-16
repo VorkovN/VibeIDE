@@ -62,10 +62,12 @@ bool applyEnvironment(const QStringList &entries, QProcessEnvironment &environme
 }
 }
 
-RunConfigurations::RunConfigurations(const QString &projectRoot, bool isWeb, QWidget *parent)
+RunConfigurations::RunConfigurations(const QString &projectRoot, bool isWeb, std::function<bool()> prepareRun,
+                                     QWidget *parent)
     : QWidget(parent),
       projectRoot_(projectRoot),
       isWeb_(isWeb),
+      prepareRun_(std::move(prepareRun)),
       menu_(new QMenu(this)),
       selector_(new QToolButton(this)),
       runButton_(new QPushButton(tr("Run"), this))
@@ -423,6 +425,8 @@ void RunConfigurations::runOrStopSelected()
         emit stopRequested(id);
         return;
     }
+    if (!prepareRun_())
+        return;
 
     QString program;
     QStringList arguments;

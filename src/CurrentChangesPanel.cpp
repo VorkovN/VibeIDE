@@ -6,6 +6,7 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QProcessEnvironment>
+#include <QScrollBar>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -66,7 +67,7 @@ CurrentChangesPanel::CurrentChangesPanel(const QString &root, QWidget *parent)
             showChanges();
         }
     });
-    timer_.setInterval(5000);
+    timer_.setInterval(2000);
     connect(&timer_, &QTimer::timeout, this, &CurrentChangesPanel::refresh);
 }
 
@@ -128,6 +129,8 @@ void CurrentChangesPanel::showChanges()
 
     const auto *selected = files_->currentItem();
     const auto selectedPath = selected ? selected->data(0, Qt::UserRole).toByteArray() : QByteArray{};
+    auto *scrollBar = files_->verticalScrollBar();
+    const int scrollPosition = scrollBar->value();
     files_->clear();
     const auto changes = GitStatus::parse(displayed_);
     for (const auto &change : changes) {
@@ -141,6 +144,8 @@ void CurrentChangesPanel::showChanges()
             files_->setCurrentItem(item);
     }
     files_->setVisible(!changes.isEmpty());
+    files_->doItemsLayout();
+    scrollBar->setValue(scrollPosition);
     status_->setVisible(changes.isEmpty());
     status_->setText(tr("No uncommitted changes."));
 }

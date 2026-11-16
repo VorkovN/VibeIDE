@@ -160,7 +160,7 @@ private:
     int value_;
 };
 
-enum class WorktreeRead { Text, Missing, Oversized, Unsupported, Changed, Error };
+enum class WorktreeRead { Text, Symlink, Missing, Oversized, Unsupported, Changed, Error };
 
 struct WorktreeFile {
     WorktreeRead state;
@@ -227,7 +227,7 @@ WorktreeFile readWorktreeFile(const QString &root, const QByteArray &path)
         if (count == target.size() || count > BlobLimit)
             return {WorktreeRead::Oversized, {}};
         target.truncate(count);
-        return {WorktreeRead::Text, std::move(target)};
+        return {WorktreeRead::Symlink, std::move(target)};
     }
 
     if (!S_ISREG(before.st_mode))
@@ -382,9 +382,10 @@ void CommitDiffSource::loadPreview(const File &file)
     });
 }
 
-void CommitDiffSource::loadWorkingFiles()
+void CommitDiffSource::loadWorkingFiles(const QByteArray &selectedPath)
 {
-    run({QStringLiteral("rev-parse"), QStringLiteral("--show-toplevel")}, ListLimit, [this](Result result) {
+    run({QStringLiteral("rev-parse"), QStringLiteral("--show-toplevel")}, ListLimit,
+        [this, selectedPath](Result result) {
         if (!result.error.isEmpty() || result.oversized) {
             emit failed(result.oversized ? tr("Could not determine the Git worktree directory.") : result.error);
             return;
@@ -397,14 +398,46 @@ void CommitDiffSource::loadWorkingFiles()
             emit failed(tr("Could not open the Git worktree directory."));
             return;
         }
-        run(GitStatus::arguments(), ListLimit, [this](Result status) {
+        readWorkingState(selectedPath, true);
+    });
+}
+
+void CommitDiffSource::refreshWorkingFiles(const QByteArray &selectedPath)
+{
+    if (!process_ && !workingRoot_.isEmpty())
+        readWorkingState(selectedPath, false);
+}
+
+QByteArray CommitDiffSource::workingSnapshot(const QByteArray &path) const
+{
+    auto file = readWorktreeFile(workingRoot_, path);
+    QByteArray snapshot(1, static_cast<char>(file.state));
+    snapshot.append(std::move(file.bytes));
+    return snapshot;
+}
+
+void CommitDiffSource::readWorkingState(const QByteArray &selectedPath, bool initial)
+{
+    run({QStringLiteral("rev-parse"), QStringLiteral("--verify"), QStringLiteral("--quiet"),
+         QStringLiteral("HEAD^{commit}")}, ErrorLimit, [this, selectedPath, initial](Result head) {
+        if (head.oversized || !head.error.isEmpty()) {
+            if (initial)
+                emit failed(head.oversized ? tr("Could not read Git HEAD.") : head.error);
+            return;
+        }
+        run(GitStatus::arguments(), ListLimit, [this, selectedPath, initial, object = head.data.trimmed()](Result status) {
             if (!status.error.isEmpty() || status.oversized) {
-                emit failed(status.oversized ? tr("The worktree has too many changes to display.") : status.error);
+                if (initial)
+                    emit failed(status.oversized ? tr("The worktree has too many changes to display.") : status.error);
                 return;
             }
-            emit filesReady(workingFiles(status.data));
+            if (workingStatus_ != status.data) {
+                workingStatus_ = std::move(status.data);
+                workingFiles_ = workingFiles(workingStatus_);
+            }
+            emit workingStateReady({workingFiles_, object, workingSnapshot(selectedPath)});
         }, workingRoot_);
-    });
+    }, workingRoot_, true);
 }
 
 void CommitDiffSource::loadWorkingPreview(const File &file)
@@ -421,6 +454,7 @@ void CommitDiffSource::loadWorkingPreview(const File &file)
     Preview preview;
     switch (worktree.state) {
     case WorktreeRead::Text:
+    case WorktreeRead::Symlink:
         if (!decodeBlob(worktree.bytes, preview.after))
             return;
         break;
@@ -439,7 +473,8 @@ void CommitDiffSource::loadWorkingPreview(const File &file)
         emit failed(tr("Could not read the file in the worktree. %1").arg(worktree.error));
         return;
     }
-    loadWorkingBefore(file, std::move(preview), worktree.state == WorktreeRead::Text);
+    loadWorkingBefore(file, std::move(preview), worktree.state == WorktreeRead::Text ||
+        worktree.state == WorktreeRead::Symlink);
 }
 
 void CommitDiffSource::loadWorkingBefore(const File &file, Preview preview, bool afterExists)

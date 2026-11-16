@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QPlainTextEdit>
+#include <QTimer>
 
 class SyntaxHighlighting;
 
@@ -16,17 +17,22 @@ public:
     LoadResult openFile(const QString &absolutePath, qsizetype limit, const QString &expectedText = {});
     void clearFile(const QString &message = {});
     void reloadIfClean();
-    bool confirmClose();
-    bool save();
+    bool flushAutosave();
+    const QString &autosaveError() const { return autosaveError_; }
     QString editorText() const;
     void setSyntaxFileName(const QString &name);
 
 signals:
     void saved();
+    void autosaveErrorChanged(const QString &message);
 
 private:
+    void setAutosaveError(const QString &message);
+
     QString path_;
     QString target_;
+    QString autosaveError_;
+    QTimer autosave_;
     QByteArray original_;
     QByteArray newline_ = "\n";
     qsizetype limit_ = 0;

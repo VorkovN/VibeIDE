@@ -36,7 +36,6 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QScrollBar>
-#include <QShortcut>
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -343,8 +342,14 @@ public:
         views->setCurrentWidget(git);
         auto *toolbar = git->toolbar();
         views->setCornerWidget(toolbar, Qt::TopRightCorner);
-        connect(views, &QTabWidget::currentChanged, views, [views, git, toolbar] {
-            toolbar->setVisible(views->currentWidget() == git);
+        connect(views, &QTabWidget::currentChanged, this, [this, views, files, git, toolbar] {
+            auto *page = views->currentWidget();
+            toolbar->setVisible(page == git);
+            flushAutosaves();
+            if (page == files)
+                files->reloadIfClean();
+            else
+                CommitDiffView::reloadIfClean(page);
         });
         const auto showDiff = [views, files](const QString &hash, const QString &title, auto createPage) {
             const int index = views->indexOf(files) + 1;
@@ -353,8 +358,10 @@ public:
                     views->setCurrentWidget(existing);
                     return;
                 }
-                if (!CommitDiffView::confirmClose(existing))
+                if (!CommitDiffView::flushAutosave(existing)) {
+                    views->setCurrentWidget(existing);
                     return;
+                }
                 views->removeTab(index);
                 existing->deleteLater();
             }
@@ -376,18 +383,12 @@ public:
             if (tab <= views->indexOf(files))
                 return;
             auto *page = views->widget(tab);
-            if (!CommitDiffView::confirmClose(page))
+            if (!CommitDiffView::flushAutosave(page)) {
+                views->setCurrentWidget(page);
                 return;
+            }
             views->removeTab(tab);
             page->deleteLater();
-        });
-        auto *saveShortcut = new QShortcut(QKeySequence::Save, views);
-        saveShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-        connect(saveShortcut, &QShortcut::activated, views, [views, files] {
-            if (views->currentWidget() == files)
-                files->save();
-            else if (auto *editor = CommitDiffView::workingEditor(views->currentWidget()))
-                editor->save();
         });
         split_->addWidget(views);
 
@@ -464,7 +465,13 @@ public:
         });
 
         if (canRun) {
-            runs_ = new RunConfigurations(root, isWeb, this);
+            runs_ = new RunConfigurations(root, isWeb, [this] {
+                const auto error = flushAutosaves();
+                if (error.isEmpty())
+                    return true;
+                QMessageBox::warning(this, tr("Run Blocked by Autosave Error"), error);
+                return false;
+            }, this);
             runs_->restoreState(state.value("runConfigurations").toObject());
             connect(runs_, &RunConfigurations::stateChanged, this, [this] { changed_(); });
             connect(runs_, &RunConfigurations::runRequested, this,
@@ -505,9 +512,16 @@ public:
 
     RunConfigurations *runConfigurations() const { return runs_; }
 
-    bool confirmClose()
+    QString flushAutosaves()
     {
-        return files_->confirmClose() && CommitDiffView::confirmClose(views_->widget(views_->indexOf(files_) + 1));
+        const bool filesSaved = files_->flushAutosave();
+        auto *diff = views_->widget(views_->indexOf(files_) + 1);
+        const bool diffSaved = CommitDiffView::flushAutosave(diff);
+        if (!filesSaved)
+            return files_->autosaveError();
+        if (!diffSaved)
+            return CommitDiffView::workingEditor(diff)->autosaveError();
+        return {};
     }
 
     QJsonObject saveState() const
@@ -896,8 +910,13 @@ void Workspace::removeProject(int tab)
 {
     const int index = tabs_->tabData(tab).toInt();
     const auto project = projects_.at(index);
-    if (project.view && !project.view->confirmClose())
-        return;
+    if (project.view) {
+        const auto error = project.view->flushAutosaves();
+        if (!error.isEmpty()) {
+            QMessageBox::warning(this, tr("Could Not Close Project"), error);
+            return;
+        }
+    }
     auto *runs = project.view ? project.view->runConfigurations() : nullptr;
     const auto runState = runs ? runs->saveState() : project.state.value("runConfigurations").toObject();
     if (!runState.value("configurations").toArray().isEmpty()) {
@@ -978,11 +997,18 @@ void Workspace::updateSessionStatus(bool saved)
 
 void Workspace::closeEvent(QCloseEvent *event)
 {
+    QStringList errors;
     for (const auto &project : std::as_const(projects_)) {
-        if (project.view && !project.view->confirmClose()) {
-            event->ignore();
-            return;
-        }
+        if (!project.view)
+            continue;
+        const auto error = project.view->flushAutosaves();
+        if (!error.isEmpty())
+            errors.append(error);
+    }
+    if (!errors.isEmpty()) {
+        event->ignore();
+        QMessageBox::warning(this, tr("Could Not Close VibeIDE"), errors.join(QStringLiteral("\n\n")));
+        return;
     }
     if (!saveSession()) {
         const auto decision = QMessageBox::warning(this, tr("Workspace Save Failed"),

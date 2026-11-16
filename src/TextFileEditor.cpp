@@ -5,7 +5,6 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFontDatabase>
-#include <QMessageBox>
 #include <QSaveFile>
 #include <QScrollBar>
 #include <QStringDecoder>
@@ -37,6 +36,14 @@ TextFileEditor::TextFileEditor(QWidget *parent) : QPlainTextEdit(parent)
     setReadOnly(true);
     setLineWrapMode(NoWrap);
     setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    autosave_.setSingleShot(true);
+    autosave_.setInterval(1000);
+    autosave_.setTimerType(Qt::PreciseTimer);
+    connect(&autosave_, &QTimer::timeout, this, &TextFileEditor::flushAutosave);
+    connect(document(), &QTextDocument::contentsChanged, this, [this] {
+        if (!isReadOnly() && !autosave_.isActive())
+            autosave_.start();
+    });
 }
 
 TextFileEditor::LoadResult TextFileEditor::openFile(const QString &absolutePath, qsizetype limit,
@@ -93,12 +100,14 @@ TextFileEditor::LoadResult TextFileEditor::openFile(const QString &absolutePath,
     newline_ = crlf > 0 ? QByteArray("\r\n") : cr > 0 ? QByteArray("\r") : QByteArray("\n");
     bom_ = hasBom;
     original_ = std::move(bytes);
+    document()->setModified(false);
     setReadOnly(false);
     return LoadResult::Ready;
 }
 
 void TextFileEditor::clearFile(const QString &message)
 {
+    autosave_.stop();
     path_.clear();
     target_.clear();
     original_.clear();
@@ -107,6 +116,7 @@ void TextFileEditor::clearFile(const QString &message)
     clear();
     document()->setModified(false);
     setPlaceholderText(message);
+    setAutosaveError({});
 }
 
 void TextFileEditor::reloadIfClean()
@@ -132,29 +142,20 @@ void TextFileEditor::reloadIfClean()
     horizontalScrollBar()->setValue(horizontal);
 }
 
-bool TextFileEditor::confirmClose()
+void TextFileEditor::setAutosaveError(const QString &message)
 {
-    if (!document()->isModified())
-        return true;
-    const auto action = QMessageBox::warning(this, tr("Unsaved Changes"),
-        tr("Save changes to %1?").arg(QFileInfo(path_).fileName()),
-        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
-    return action == QMessageBox::Discard || (action == QMessageBox::Save && save());
+    if (autosaveError_ == message)
+        return;
+    autosaveError_ = message;
+    emit autosaveErrorChanged(autosaveError_);
 }
 
-bool TextFileEditor::save()
+bool TextFileEditor::flushAutosave()
 {
-    if (!document()->isModified())
+    autosave_.stop();
+    if (isReadOnly() || !document()->isModified()) {
+        setAutosaveError({});
         return true;
-    if (isReadOnly())
-        return false;
-    const QFileInfo info(path_);
-    QByteArray current;
-    if (info.isSymLink() || info.canonicalFilePath() != target_ ||
-        !readFile(target_, original_.size(), current) || current != original_) {
-        QMessageBox::warning(this, tr("File Changed on Disk"),
-            tr("%1 was changed or removed outside this editor. Your edits are still open.").arg(path_));
-        return false;
     }
 
     QByteArray bytes = editorText().toUtf8();
@@ -163,13 +164,41 @@ bool TextFileEditor::save()
     if (bom_)
         bytes.prepend(utf8Bom);
 
-    QSaveFile file(target_);
-    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
-        QMessageBox::warning(this, tr("Could Not Save File"), tr("%1\n%2").arg(path_, file.errorString()));
-        return false;
+    if (bytes == original_) {
+        document()->setModified(false);
+        setAutosaveError({});
+        return true;
     }
+
+    const auto unchangedOnDisk = [this] {
+        const QFileInfo info(path_);
+        QByteArray current;
+        return !info.isSymLink() && info.canonicalFilePath() == target_
+            && readFile(target_, original_.size(), current) && current == original_;
+    };
+    const auto diskConflict = [this] {
+        setAutosaveError(tr("Could not autosave %1 because it changed or was removed on disk. Your edits are still open.")
+            .arg(QFileInfo(path_).fileName()));
+        return false;
+    };
+    if (!unchangedOnDisk())
+        return diskConflict();
+
+    QSaveFile file(target_);
+    const auto writeFailed = [this, &file] {
+        setAutosaveError(tr("Could not autosave %1. %2").arg(QFileInfo(path_).fileName(), file.errorString()));
+        return false;
+    };
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size())
+        return writeFailed();
+    if (!unchangedOnDisk())
+        return diskConflict();
+    if (!file.commit())
+        return writeFailed();
+
     original_ = std::move(bytes);
     document()->setModified(false);
+    setAutosaveError({});
     emit saved();
     return true;
 }

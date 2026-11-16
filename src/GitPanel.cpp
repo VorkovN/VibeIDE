@@ -408,7 +408,7 @@ GitPanel::GitPanel(const QString &projectRoot, QWidget *parent)
 
     layout->addWidget(history_, 1);
 
-    historyTimer_.setInterval(3000);
+    historyTimer_.setInterval(2000);
     connect(&historyTimer_, &QTimer::timeout, this, &GitPanel::checkHistory);
     connect(actions_, &GitActions::repositoryChanged, this, &GitPanel::checkHistory);
     auto *scrollBar = history_->verticalScrollBar();
@@ -533,7 +533,7 @@ void GitPanel::updateHistoryStatus(const QString &status)
 
 void GitPanel::checkHistory()
 {
-    if (!isVisible() || historyCommand_ || statsCommand_)
+    if (!isVisible() || historyCommand_)
         return;
 
     runGit(historyCommand_, projectRoot_,
@@ -545,6 +545,7 @@ void GitPanel::checkHistory()
             historyTips_.clear();
             historyCurrent_ = false;
             hasOlder_ = false;
+            cancel(statsCommand_);
             history_->clear();
             updateHistoryStatus(tr("Git history is unavailable"));
             historyStatus_->setToolTip(result.error);
@@ -673,10 +674,13 @@ void GitPanel::appendHistory(const QByteArray &output, int limit, bool replace, 
     const auto hashFor = [](const QTreeWidgetItem *item) {
         return item ? item->data(0, Qt::UserRole).toString() : QString{};
     };
+    // Scrollbar signals can fire while the tree is being rebuilt.
+    hasOlder_ = false;
     QString currentHash;
     QString topHash;
     QSet<QString> selected;
     if (replace) {
+        cancel(statsCommand_);
         currentHash = hashFor(history_->currentItem());
         for (const auto *item : history_->selectedItems())
             selected.insert(hashFor(item));

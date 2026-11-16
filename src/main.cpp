@@ -27,6 +27,21 @@ public:
     void drawPrimitive(PrimitiveElement element, const QStyleOption *option, QPainter *painter,
                        const QWidget *widget = nullptr) const override
     {
+        const bool diffArrow = (element == PE_IndicatorArrowUp || element == PE_IndicatorArrowDown)
+            && widget && widget->objectName() == QLatin1String("diffNavigation");
+        if (diffArrow) {
+            const QPointF center = QRectF(option->rect).center();
+            const qreal direction = element == PE_IndicatorArrowUp ? -1 : 1;
+            const auto role = option->state.testFlag(State_Enabled) ? QPalette::ButtonText : QPalette::PlaceholderText;
+            painter->save();
+            painter->setRenderHint(QPainter::Antialiasing);
+            painter->setPen(QPen(option->palette.color(role), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            painter->drawPolyline(QPolygonF{center + QPointF(-4, -2 * direction),
+                                            center + QPointF(0, 2 * direction),
+                                            center + QPointF(4, -2 * direction)});
+            painter->restore();
+            return;
+        }
         if (element != PE_IndicatorTabClose) {
             QProxyStyle::drawPrimitive(element, option, painter, widget);
             return;
@@ -116,14 +131,19 @@ QString themeStyleSheet(bool light)
             background: #1b2331; border: 1px solid palette(mid); border-radius: 6px;
         }
         QWidget#runBar { background: #222c3d; }
-        QPushButton, QToolButton {
+        QPushButton, QToolButton, QComboBox#diffMode {
             background: #273348; border: 1px solid palette(mid);
             border-radius: 4px; padding: 5px 9px;
         }
-        QPushButton:hover, QToolButton:hover { background: #354563; }
-        QPushButton:focus, QToolButton:focus { border-color: #86a7eb; }
-        QPushButton:pressed, QToolButton:pressed { background: #1b2538; }
-        QPushButton:disabled, QToolButton:disabled { background: #222a38; color: palette(placeholder-text); }
+        QPushButton:hover, QToolButton:hover, QComboBox#diffMode:hover { background: #354563; }
+        QPushButton:focus, QToolButton:focus, QComboBox#diffMode:focus { border-color: #86a7eb; }
+        QPushButton:pressed, QToolButton:pressed, QComboBox#diffMode:on { background: #1b2538; }
+        QPushButton:disabled, QToolButton:disabled, QComboBox#diffMode:disabled {
+            background: #222a38; color: palette(placeholder-text);
+        }
+        QToolButton#diffNavigation { padding: 0; }
+        QComboBox#diffMode { padding: 0 25px 0 9px; }
+        QComboBox#diffMode::drop-down { subcontrol-origin: padding; width: 24px; border: 0; }
         QPushButton#runButton:enabled {
             background: #24704e; border-color: #3a956c; color: #f2fff8; min-width: 34px;
         }

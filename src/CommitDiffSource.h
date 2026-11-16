@@ -23,6 +23,8 @@ public:
         QByteArray newMode;
         QByteArray status;
         QByteArray workingPath;
+
+        bool operator==(const File &) const = default;
     };
 
     // Starts use Git's one-based line numbers. An empty range points at the
@@ -41,18 +43,27 @@ public:
         QString unavailableReason;
     };
 
+    struct WorkingState {
+        QList<File> files;
+        QByteArray head;
+        QByteArray selectedSnapshot;
+    };
+
     explicit CommitDiffSource(const QString &repository, QObject *parent = nullptr);
     ~CommitDiffSource() override;
 
     void loadFiles(const QString &fullHash);
     void loadPreview(const File &file);
-    void loadWorkingFiles();
+    void loadWorkingFiles(const QByteArray &selectedPath);
+    void refreshWorkingFiles(const QByteArray &selectedPath);
     void loadWorkingPreview(const File &file);
     void compareWorkingText(Preview preview);
     const QString &workingRoot() const { return workingRoot_; }
+    QByteArray workingSnapshot(const QByteArray &path) const;
 
 signals:
     void filesReady(const QList<File> &files);
+    void workingStateReady(const WorkingState &state);
     void previewReady(const Preview &preview);
     void failed(const QString &error);
 
@@ -69,6 +80,7 @@ private:
     void loadBlob(const QByteArray &object, std::function<void(QString)> completion);
     void loadHunks(const File &file, Preview preview);
     void loadWorkingBefore(const File &file, Preview preview, bool afterExists);
+    void readWorkingState(const QByteArray &selectedPath, bool initial);
     void compareWorking(Preview preview, bool beforeExists, bool afterExists);
     void finishComparison(Preview preview, Result result);
     bool decodeBlob(const QByteArray &data, QString &text);
@@ -79,5 +91,7 @@ private:
 
     QString repository_;
     QString workingRoot_;
+    QByteArray workingStatus_;
+    QList<File> workingFiles_;
     QProcess *process_ = nullptr;
 };

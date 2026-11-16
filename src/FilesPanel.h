@@ -14,8 +14,9 @@ class FilesPanel final : public QWidget
 {
 public:
     explicit FilesPanel(const QString &root, QWidget *parent = nullptr);
-    bool confirmClose();
-    bool save();
+    bool flushAutosave();
+    const QString &autosaveError() const;
+    void reloadIfClean();
 
 protected:
     void showEvent(QShowEvent *event) override;

@@ -37,6 +37,7 @@ qt_add_executable(VibeIDE MACOSX_BUNDLE
 )
 target_link_libraries(VibeIDE PRIVATE Qt6::Widgets PkgConfig::VTerm)
 set_target_properties(VibeIDE PROPERTIES
+    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/assets/Info.plist.in"
     MACOSX_BUNDLE_GUI_IDENTIFIER "org.vibeide.desktop"
     MACOSX_BUNDLE_BUNDLE_NAME "VibeIDE"
     MACOSX_BUNDLE_ICON_FILE "VibeIDE.icns"

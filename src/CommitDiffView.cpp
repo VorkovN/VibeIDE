@@ -19,6 +19,8 @@
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QStyleOptionComboBox>
+#include <QStylePainter>
 #include <QTextBlock>
 #include <QTimer>
 #include <QToolButton>
@@ -31,6 +33,29 @@
 namespace {
 constexpr qsizetype maxLines = 30'000;
 constexpr qsizetype workingFileLimit = 1024 * 1024;
+
+class DiffModeSelector final : public QComboBox
+{
+public:
+    using QComboBox::QComboBox;
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QStyleOptionComboBox option;
+        initStyleOption(&option);
+        const auto arrow = style()->subControlRect(QStyle::CC_ComboBox, &option, QStyle::SC_ComboBoxArrow, this);
+        option.subControls &= ~QStyle::SC_ComboBoxArrow;
+        const QPointF center = QRectF(arrow).center();
+        const auto role = isEnabled() ? QPalette::ButtonText : QPalette::PlaceholderText;
+        QStylePainter painter(this);
+        painter.drawComplexControl(QStyle::CC_ComboBox, option);
+        painter.drawControl(QStyle::CE_ComboBoxLabel, option);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(palette().color(role), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.drawPolyline(QPolygonF{center + QPointF(-4, -2), center + QPointF(0, 2), center + QPointF(4, -2)});
+    }
+};
 
 enum class Change { None, Added, Removed, Padding };
 
@@ -320,26 +345,30 @@ public:
 
         auto *layout = new QVBoxLayout(this);
         layout->setContentsMargins(8, 8, 8, 8);
-        auto *title = new QHBoxLayout;
-        auto *description = new QLabel(working_ ? tr("Current changes")
-            : hash.left(12) + QStringLiteral("  ") + subject, this);
-        description->setTextFormat(Qt::PlainText);
-        if (!working_)
-            description->setToolTip(hash + QLatin1Char('\n') + subject);
-        description->setWordWrap(true);
-        description->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-        title->addWidget(description, 1);
-
-        previous_ = changeButton(tr("Previous change (Shift+F7)"), QStyle::SP_ArrowUp, Qt::SHIFT | Qt::Key_F7, -1);
-        next_ = changeButton(tr("Next change (F7)"), QStyle::SP_ArrowDown, Qt::Key_F7, 1);
-        title->addWidget(previous_);
-        title->addWidget(next_);
-        mode_ = new QComboBox(this);
+        auto *toolbar = new QHBoxLayout;
+        toolbar->setSpacing(6);
+        previous_ = changeButton(tr("Previous change (Shift+F7)"), Qt::UpArrow, Qt::SHIFT | Qt::Key_F7, -1);
+        next_ = changeButton(tr("Next change (F7)"), Qt::DownArrow, Qt::Key_F7, 1);
+        toolbar->addWidget(previous_);
+        toolbar->addWidget(next_);
+        mode_ = new DiffModeSelector(this);
         mode_->setObjectName("diffMode");
         mode_->setAccessibleName(tr("Diff view mode"));
         mode_->addItems({tr("Side by Side"), tr("Unified")});
-        title->addWidget(mode_);
-        layout->addLayout(title);
+        mode_->setFixedHeight(28);
+        toolbar->addWidget(mode_);
+        if (working_) {
+            toolbar->addStretch(1);
+        } else {
+            toolbar->addSpacing(6);
+            auto *description = new QLabel(hash.left(12) + QStringLiteral("  ") + subject, this);
+            description->setTextFormat(Qt::PlainText);
+            description->setToolTip(hash + QLatin1Char('\n') + subject);
+            description->setWordWrap(true);
+            description->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            toolbar->addWidget(description, 1);
+        }
+        layout->addLayout(toolbar);
 
         auto *split = new QSplitter(Qt::Horizontal, this);
         split->setChildrenCollapsible(false);
@@ -367,6 +396,15 @@ public:
         status_->setWordWrap(true);
         status_->setObjectName("muted");
         viewLayout->addWidget(status_);
+        if (working_) {
+            autosaveStatus_ = new QLabel(view);
+            autosaveStatus_->setTextFormat(Qt::PlainText);
+            autosaveStatus_->setWordWrap(true);
+            autosaveStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            autosaveStatus_->setObjectName("autosaveStatus");
+            autosaveStatus_->hide();
+            viewLayout->addWidget(autosaveStatus_);
+        }
         pages_ = new QStackedWidget(view);
         auto *paired = new QSplitter(Qt::Horizontal, pages_);
         paired->setChildrenCollapsible(false);
@@ -398,7 +436,7 @@ public:
         connect(files_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *item, QTreeWidgetItem *previous) {
             if (!item)
                 return;
-            if (auto *editor = workingEditor(); editor && !editor->confirmClose()) {
+            if (auto *editor = workingEditor(); editor && !editor->flushAutosave()) {
                 const QSignalBlocker blocked(files_);
                 files_->setCurrentItem(previous);
                 return;
@@ -407,6 +445,15 @@ public:
         });
 
         if (working_) {
+            worktreeRefresh_.setInterval(2000);
+            connect(&worktreeRefresh_, &QTimer::timeout, this, [this] {
+                if (!after_->document()->isModified() && !compareEdited_.isActive())
+                    source_.refreshWorkingFiles(selectedWorkingPath());
+            });
+            connect(&source_, &CommitDiffSource::workingStateReady, this,
+                    [this, workingPath](const CommitDiffSource::WorkingState &state) {
+                updateWorkingState(state, workingPath);
+            });
             compareEdited_.setSingleShot(true);
             compareEdited_.setInterval(180);
             connect(&compareEdited_, &QTimer::timeout, this, &DiffPage::compareWorkingEdit);
@@ -418,24 +465,17 @@ public:
                 compareEdited_.start();
             });
             connect(after_->document(), &QTextDocument::modificationChanged, this, &DiffPage::updateFileLabel);
+            connect(after_, &TextFileEditor::saved, this, [this] {
+                worktreeSnapshot_ = source_.workingSnapshot(selectedWorkingPath());
+            });
+            connect(after_, &TextFileEditor::autosaveErrorChanged, this, [this](const QString &error) {
+                autosaveStatus_->setText(error);
+                autosaveStatus_->setVisible(!error.isEmpty());
+            });
         }
-        connect(&source_, &CommitDiffSource::filesReady, this, [this, workingPath](const QList<CommitDiffSource::File> &files) {
-            changedFiles_ = files;
-            QTreeWidgetItem *requested = nullptr;
-            for (qsizetype index = 0; index < files.size(); ++index) {
-                const auto &file = files.at(index);
-                const auto paths = displayPath(file);
-                auto *item = new QTreeWidgetItem(files_, {paths});
-                item->setData(0, Qt::UserRole, index);
-                GitFileList::setStatus(*item, *files_, file.status);
-                if (working_ && file.workingPath == workingPath)
-                    requested = item;
-            }
-            if (requested) {
-                files_->setCurrentItem(requested);
-            } else if (working_) {
-                status_->setText(tr("The selected file no longer has uncommitted changes."));
-            } else if (files_->topLevelItemCount() > 0) {
+        connect(&source_, &CommitDiffSource::filesReady, this, [this](const QList<CommitDiffSource::File> &files) {
+            populateFiles(files);
+            if (files_->topLevelItemCount() > 0) {
                 files_->setCurrentItem(files_->topLevelItem(0));
             } else {
                 status_->setText(tr("This commit has no changed files."));
@@ -443,7 +483,9 @@ public:
         });
         connect(&source_, &CommitDiffSource::previewReady, this, &DiffPage::showPreview);
         connect(&source_, &CommitDiffSource::failed, this, [this](const QString &error) {
-            if (!editingFile_)
+            const bool duringRefresh = std::exchange(refreshingPreview_, false);
+            refreshRequired_ |= duringRefresh;
+            if (!editingFile_ && !duringRefresh)
                 clearEditors();
             status_->setText(error);
             status_->show();
@@ -451,17 +493,15 @@ public:
         clearEditors();
         status_->setText(tr("Loading changed files…"));
         if (working_)
-            source_.loadWorkingFiles();
+            source_.loadWorkingFiles(workingPath);
         else
             source_.loadFiles(hash);
     }
 
     TextFileEditor *workingEditor() const { return editingFile_ ? after_ : nullptr; }
 
-protected:
-    void showEvent(QShowEvent *event) override
+    void reloadIfClean()
     {
-        QWidget::showEvent(event);
         if (!editingFile_ || after_->document()->isModified())
             return;
         const auto previous = after_->editorText();
@@ -473,12 +513,29 @@ protected:
             compareEdited_.start();
     }
 
+protected:
+    void showEvent(QShowEvent *event) override
+    {
+        QWidget::showEvent(event);
+        reloadIfClean();
+        if (working_)
+            worktreeRefresh_.start();
+    }
+
+    void hideEvent(QHideEvent *event) override
+    {
+        worktreeRefresh_.stop();
+        QWidget::hideEvent(event);
+    }
+
 private:
-    QToolButton *changeButton(const QString &label, QStyle::StandardPixmap icon,
+    QToolButton *changeButton(const QString &label, Qt::ArrowType arrow,
                               const QKeySequence &shortcut, int direction)
     {
         auto *button = new QToolButton(this);
-        button->setIcon(style()->standardIcon(icon));
+        button->setObjectName("diffNavigation");
+        button->setArrowType(arrow);
+        button->setFixedSize(30, 28);
         button->setToolTip(label);
         button->setAccessibleName(label);
         auto *action = new QAction(this);
@@ -531,9 +588,77 @@ private:
         return GitStatus::displayPath(file.oldPath) + QStringLiteral(" → ") + GitStatus::displayPath(file.newPath);
     }
 
+    QTreeWidgetItem *populateFiles(const QList<CommitDiffSource::File> &files, const QByteArray &selectedPath = {})
+    {
+        const QSignalBlocker blocked(files_);
+        const int scroll = files_->verticalScrollBar()->value();
+        files_->clear();
+        changedFiles_ = files;
+        QTreeWidgetItem *selected = nullptr;
+        for (qsizetype index = 0; index < files.size(); ++index) {
+            const auto &file = files.at(index);
+            auto *item = new QTreeWidgetItem(files_, {displayPath(file)});
+            item->setData(0, Qt::UserRole, index);
+            GitFileList::setStatus(*item, *files_, file.status);
+            if (!selectedPath.isEmpty() && file.workingPath == selectedPath)
+                selected = item;
+        }
+        files_->setCurrentItem(selected);
+        files_->verticalScrollBar()->setValue(scroll);
+        return selected;
+    }
+
+    const CommitDiffSource::File &fileFor(const QTreeWidgetItem *item) const
+    {
+        return changedFiles_.at(item->data(0, Qt::UserRole).toLongLong());
+    }
+
+    QByteArray selectedWorkingPath() const
+    {
+        const auto *item = files_->currentItem();
+        return item ? fileFor(item).workingPath : QByteArray{};
+    }
+
+    void updateWorkingState(const CommitDiffSource::WorkingState &state, const QByteArray &initialPath)
+    {
+        if (after_->document()->isModified() || compareEdited_.isActive())
+            return;
+        const bool firstLoad = !workingStateLoaded_;
+        workingStateLoaded_ = true;
+        auto *selected = files_->currentItem();
+        const auto previousFile = selected ? fileFor(selected) : CommitDiffSource::File{};
+        const bool filesChanged = firstLoad || changedFiles_ != state.files;
+        if (filesChanged)
+            selected = populateFiles(state.files, firstLoad ? initialPath : previousFile.workingPath);
+
+        const bool headChanged = worktreeHead_ != state.head;
+        const bool diskChanged = worktreeSnapshot_ != state.selectedSnapshot;
+        worktreeHead_ = state.head;
+        worktreeSnapshot_ = state.selectedSnapshot;
+        if (!selected) {
+            if (filesChanged) {
+                displayedPath_.clear();
+                clearEditors();
+                status_->setText(state.files.isEmpty() ? tr("No uncommitted changes.")
+                    : tr("Select a changed file to compare."));
+                status_->show();
+            }
+        } else if (firstLoad) {
+            showFile(selected);
+        } else if (headChanged || diskChanged || refreshRequired_ || previousFile != fileFor(selected)) {
+            displayedPath_ = displayPath(fileFor(selected));
+            updateFileLabel();
+            refreshingPreview_ = true;
+            refreshRequired_ = false;
+            source_.loadWorkingPreview(fileFor(selected));
+        }
+    }
+
     void clearEditors()
     {
         editingFile_ = false;
+        refreshingPreview_ = false;
+        refreshRequired_ = false;
         compareEdited_.stop();
         currentChange_ = -1;
         alignedChanges_.clear();
@@ -554,60 +679,105 @@ private:
 
     void showFile(const QTreeWidgetItem *item)
     {
-        const auto &file = changedFiles_.at(item->data(0, Qt::UserRole).toLongLong());
+        const auto &file = fileFor(item);
         displayedPath_ = displayPath(file);
         clearEditors();
         status_->setText(tr("Loading file versions…"));
         status_->show();
-        if (working_)
+        if (working_) {
+            worktreeSnapshot_ = source_.workingSnapshot(file.workingPath);
             source_.loadWorkingPreview(file);
-        else
+        } else {
             source_.loadPreview(file);
+        }
     }
 
     void updateFileLabel()
     {
         const bool modified = editingFile_ && after_->document()->isModified();
         filePath_->setText(modified ? displayedPath_ + QStringLiteral(" •") : displayedPath_);
-        filePath_->setToolTip(modified ? tr("%1\nUnsaved changes. Press %2 to save.")
-            .arg(displayedPath_, QKeySequence(QKeySequence::Save).toString(QKeySequence::NativeText))
-            : displayedPath_);
+        filePath_->setToolTip(displayedPath_);
+    }
+
+    void showComparisonUnavailable(const QString &reason, bool refreshed)
+    {
+        if (refreshed && !editingFile_) {
+            clearEditors();
+        } else if (refreshed) {
+            const QScopedValueRollback scrolling(syncingScroll_, true);
+            currentChange_ = -1;
+            alignedChanges_.clear();
+            unifiedChanges_.clear();
+            beforeRows_.clear();
+            afterRows_.clear();
+            before_->setLines({});
+            after_->setLines({}, false);
+            unified_->setLines({});
+            mode_->setCurrentIndex(0);
+            mode_->setEnabled(false);
+            updateButtons();
+        }
+        status_->setText(reason);
+        status_->show();
     }
 
     void showPreview(const CommitDiffSource::Preview &preview)
     {
-        // If typing continued while Git was comparing snapshots, keep the newer buffer intact.
-        if (editingFile_ && !preview.unavailableReason.isEmpty() && comparisonText_ != after_->editorText())
-            return;
-        if (!preview.unavailableReason.isEmpty()) {
-            status_->setText(preview.unavailableReason);
-            status_->show();
+        const bool refreshed = std::exchange(refreshingPreview_, false);
+        if (refreshed && after_->document()->isModified()) {
+            refreshRequired_ = true;
             return;
         }
-        if (editingFile_ && preview.after != after_->editorText())
+        if (refreshed && editingFile_) {
+            const QScopedValueRollback updating(updatingEditors_, true);
+            after_->reloadIfClean();
+            if (after_->isReadOnly()) {
+                editingFile_ = false;
+                after_->clearFile();
+                mode_->setToolTip({});
+            } else if (preview.unavailableReason.isEmpty()) {
+                auto expected = comparisonText(preview.after);
+                if (expected.startsWith(QChar::ByteOrderMark))
+                    expected.removeFirst();
+                if (expected != after_->editorText()) {
+                    refreshRequired_ = true;
+                    return;
+                }
+                workingBefore_ = comparisonText(preview.before);
+            }
+        }
+        // If typing continued while Git was comparing snapshots, keep the newer buffer intact.
+        if (!refreshed && editingFile_ && !preview.unavailableReason.isEmpty() && comparisonText_ != after_->editorText())
+            return;
+        if (!preview.unavailableReason.isEmpty()) {
+            showComparisonUnavailable(preview.unavailableReason, refreshed);
+            return;
+        }
+        if (!refreshed && editingFile_ && preview.after != after_->editorText())
             return;
         const auto before = fileLines(preview.before);
         const auto after = fileLines(preview.after);
         if (before.size() + after.size() > maxLines) {
-            status_->setText(tr("This file has too many lines to display."));
-            status_->show();
+            showComparisonUnavailable(tr("This file has too many lines to display."), refreshed);
             return;
         }
         Comparison comparison;
         if (!compare(before, after, preview.hunks, comparison)) {
-            status_->setText(tr("Could not align the two file versions."));
-            status_->show();
+            showComparisonUnavailable(tr("Could not align the two file versions."), refreshed);
             return;
         }
-        const bool firstLoad = !editingFile_;
-        if (firstLoad)
+        const bool firstLoad = !editingFile_ && !refreshed;
+        if (!editingFile_)
             prepareEditors(preview);
         alignedChanges_ = std::move(comparison.alignedChanges);
         unifiedChanges_ = std::move(comparison.unifiedChanges);
         {
             const QScopedValueRollback scrolling(syncingScroll_, true);
             const int afterPosition = after_->verticalScrollBar()->value();
+            const int afterHorizontal = after_->horizontalScrollBar()->value();
+            const int beforeHorizontal = before_->horizontalScrollBar()->value();
             const int unifiedPosition = unified_->verticalScrollBar()->value();
+            const int unifiedHorizontal = unified_->horizontalScrollBar()->value();
             if (editingFile_) {
                 QList<Line> actualLines;
                 beforeRows_.clear();
@@ -628,8 +798,12 @@ private:
             before_->setLines(std::move(comparison.before));
             unified_->setLines(std::move(comparison.unified));
             if (!firstLoad) {
+                after_->verticalScrollBar()->setValue(afterPosition);
                 before_->verticalScrollBar()->setValue(beforeRows_.value(afterPosition, afterPosition));
                 unified_->verticalScrollBar()->setValue(unifiedPosition);
+                after_->horizontalScrollBar()->setValue(afterHorizontal);
+                before_->horizontalScrollBar()->setValue(beforeHorizontal);
+                unified_->horizontalScrollBar()->setValue(unifiedHorizontal);
             }
         }
         status_->setText(tr("No text changes"));
@@ -684,6 +858,7 @@ private:
 
     void compareWorkingEdit()
     {
+        refreshRequired_ |= std::exchange(refreshingPreview_, false);
         CommitDiffSource::Preview preview;
         preview.before = workingBefore_;
         preview.after = after_->editorText();
@@ -734,6 +909,7 @@ private:
     QToolButton *next_ = nullptr;
     QLabel *filePath_ = nullptr;
     QLabel *status_ = nullptr;
+    QLabel *autosaveStatus_ = nullptr;
     QStackedWidget *pages_ = nullptr;
     DiffEditor *before_ = nullptr;
     DiffEditor *after_ = nullptr;
@@ -741,7 +917,10 @@ private:
     QString displayedPath_;
     QString workingBefore_;
     QString comparisonText_;
+    QByteArray worktreeHead_;
+    QByteArray worktreeSnapshot_;
     QTimer compareEdited_;
+    QTimer worktreeRefresh_;
     QList<int> beforeRows_;
     QList<int> afterRows_;
     QList<int> alignedChanges_;
@@ -750,6 +929,9 @@ private:
     bool syncingScroll_ = false;
     bool editingFile_ = false;
     bool updatingEditors_ = false;
+    bool workingStateLoaded_ = false;
+    bool refreshingPreview_ = false;
+    bool refreshRequired_ = false;
 };
 }
 
@@ -770,10 +952,16 @@ TextFileEditor *CommitDiffView::workingEditor(QWidget *page)
     return diff ? diff->workingEditor() : nullptr;
 }
 
-bool CommitDiffView::confirmClose(QWidget *page)
+bool CommitDiffView::flushAutosave(QWidget *page)
 {
     auto *editor = workingEditor(page);
-    return !editor || editor->confirmClose();
+    return !editor || editor->flushAutosave();
+}
+
+void CommitDiffView::reloadIfClean(QWidget *page)
+{
+    if (auto *diff = qobject_cast<DiffPage *>(page))
+        diff->reloadIfClean();
 }
 
 #include "CommitDiffView.moc"

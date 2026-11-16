@@ -7,6 +7,8 @@
 #include <QStringList>
 #include <QWidget>
 
+#include <functional>
+
 class QMenu;
 class QPushButton;
 class QToolButton;
@@ -16,7 +18,8 @@ class RunConfigurations final : public QWidget
     Q_OBJECT
 
 public:
-    RunConfigurations(const QString &projectRoot, bool isWeb, QWidget *parent = nullptr);
+    RunConfigurations(const QString &projectRoot, bool isWeb, std::function<bool()> prepareRun,
+                      QWidget *parent = nullptr);
 
     QJsonObject saveState() const;
     void restoreState(const QJsonObject &state);
@@ -57,6 +60,7 @@ private:
 
     QString projectRoot_;
     bool isWeb_;
+    std::function<bool()> prepareRun_;
     QList<Configuration> configurations_;
     QStringList recent_;
     QSet<QString> runningIds_;

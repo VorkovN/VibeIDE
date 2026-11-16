@@ -66,28 +66,34 @@ FilesPanel::FilesPanel(const QString &root, QWidget *parent)
     editor_->setAccessibleName(tr("File editor"));
     editor_->clearFile(tr("Select a file to open."));
     connect(editor_->document(), &QTextDocument::modificationChanged, this, &FilesPanel::updatePath);
+    connect(editor_, &TextFileEditor::autosaveErrorChanged, this, &FilesPanel::updatePath);
     detailLayout->addWidget(editor_, 1);
     split->addWidget(details);
     split->setSizes({280, 720});
     split->setStretchFactor(1, 1);
 }
 
-bool FilesPanel::confirmClose()
+bool FilesPanel::flushAutosave()
 {
-    return editor_->confirmClose();
+    return editor_->flushAutosave();
 }
 
-bool FilesPanel::save()
+const QString &FilesPanel::autosaveError() const
 {
-    return editor_->save();
+    return editor_->autosaveError();
+}
+
+void FilesPanel::reloadIfClean()
+{
+    editor_->reloadIfClean();
+    updatePath();
 }
 
 void FilesPanel::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
     if (model_) {
-        editor_->reloadIfClean();
-        updatePath();
+        reloadIfClean();
         return;
     }
     if (!QFileInfo(root_).isDir()) {
@@ -130,11 +136,10 @@ void FilesPanel::openSelection(const QModelIndex &index)
     auto info = model_->fileInfo(proxy->mapToSource(requested));
     if (info.filePath() == openedPath_) {
         openedIndex_ = requested;
-        editor_->reloadIfClean();
-        updatePath();
+        reloadIfClean();
         return;
     }
-    if (!confirmClose() || !requested.isValid()) {
+    if (!flushAutosave() || !requested.isValid()) {
         if (openedIndex_.isValid())
             tree_->setCurrentIndex(openedIndex_);
         else
@@ -157,7 +162,10 @@ void FilesPanel::updatePath()
 {
     path_->setVisible(!relativePath_.isEmpty());
     QString title = relativePath_;
-    if (editor_->document()->isModified())
+    const auto &error = autosaveError();
+    if (!error.isEmpty())
+        title = tr("Autosave failed  ·  %1").arg(title);
+    else if (editor_->document()->isModified())
         title += QStringLiteral(" *");
     else if (editor_->isReadOnly() && !editor_->document()->isEmpty()) {
         if (QFileInfo(openedPath_).size() > previewLimit)
@@ -166,5 +174,5 @@ void FilesPanel::updatePath()
             title = tr("%1  ·  Read only").arg(title);
     }
     path_->setText(title);
-    path_->setToolTip(relativePath_);
+    path_->setToolTip(error.isEmpty() ? relativePath_ : relativePath_ + u'\n' + error);
 }
