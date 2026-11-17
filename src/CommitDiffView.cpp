@@ -1,6 +1,7 @@
 #include "CommitDiffView.h"
 
 #include "CommitDiffSource.h"
+#include "DiffWordHighlights.h"
 #include "GitFileList.h"
 #include "GitStatus.h"
 #include "TextFileEditor.h"
@@ -28,11 +29,13 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 #include <utility>
 
 namespace {
 constexpr qsizetype maxLines = 30'000;
 constexpr qsizetype workingFileLimit = 1024 * 1024;
+constexpr int restoreGutterWidth = 24;
 
 class DiffModeSelector final : public QComboBox
 {
@@ -64,6 +67,7 @@ struct Line {
     int oldNumber = 0;
     int newNumber = 0;
     Change change = Change::None;
+    QList<DiffWordHighlights::Span> changedWords;
 };
 
 class DiffEditor final : public TextFileEditor
@@ -80,8 +84,12 @@ public:
         const auto font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
         setFont(font);
         setTabStopDistance(fontMetrics().horizontalAdvance(QLatin1Char(' ')) * 4);
+        setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
-        connect(this, &QPlainTextEdit::updateRequest, gutter_, [this] { gutter_->update(); });
+        connect(this, &QPlainTextEdit::updateRequest, gutter_, [this] {
+            gutter_->update();
+            updateRestoreButtons();
+        });
         connect(this, &QPlainTextEdit::blockCountChanged, this, [this] {
             if (fileDocument_)
                 updateNumberWidth(blockCount());
@@ -112,6 +120,19 @@ public:
     }
 
     int topLine() const { return firstVisibleBlock().blockNumber(); }
+
+    void enableRestoreGutter(std::function<void(qsizetype)> restore)
+    {
+        restoreHunk_ = std::move(restore);
+        restoreGutter_ = new QWidget(this);
+        updateGutter();
+    }
+
+    void setRestoreRows(QList<int> rows)
+    {
+        restoreRows_ = std::move(rows);
+        updateRestoreButtons();
+    }
 
     void jump(int line)
     {
@@ -153,14 +174,26 @@ private:
         QList<QTextEdit::ExtraSelection> selections;
         for (auto block = document()->begin(); block.isValid() && block.blockNumber() < lines_.size();
              block = block.next()) {
-            const auto change = lines_.at(block.blockNumber()).change;
-            if (change == Change::None)
+            const auto &line = lines_.at(block.blockNumber());
+            if (line.change == Change::None)
                 continue;
             QTextEdit::ExtraSelection selection;
             selection.cursor = QTextCursor(block);
             selection.format.setProperty(QTextFormat::FullWidthSelection, true);
-            selection.format.setBackground(background(change));
+            selection.format.setBackground(background(line.change));
             selections.append(selection);
+
+            if (line.changedWords.isEmpty() || block.length() - 1 != line.text.size())
+                continue;
+            const auto ink = changedWordBackground(line.change);
+            for (const auto &word : line.changedWords) {
+                QTextEdit::ExtraSelection accent;
+                accent.cursor = QTextCursor(block);
+                accent.cursor.setPosition(block.position() + word.start);
+                accent.cursor.setPosition(block.position() + word.start + word.length, QTextCursor::KeepAnchor);
+                accent.format.setBackground(ink);
+                selections.append(accent);
+            }
         }
         setExtraSelections(selections);
     }
@@ -175,6 +208,13 @@ private:
         case Change::None: return palette().color(QPalette::AlternateBase);
         }
         return {};
+    }
+
+    QColor changedWordBackground(Change change) const
+    {
+        const bool dark = palette().color(QPalette::Base).lightness() < 128;
+        return QColor(change == Change::Added ? (dark ? "#30624b" : "#a5e2bd")
+                                               : (dark ? "#713e49" : "#f5b5c0"));
     }
 
     int numberWidth() const
@@ -194,9 +234,47 @@ private:
     void updateGutter()
     {
         const int width = side_ == Unified ? 2 * numberWidth() + 17 : numberWidth() + 1;
-        setViewportMargins(width, 0, 0, 0);
+        setViewportMargins(width, 0, restoreGutter_ ? restoreGutterWidth : 0, 0);
         const auto inner = contentsRect();
         gutter_->setGeometry(inner.left(), inner.top(), width, viewport()->height());
+        updateRestoreButtons();
+    }
+
+    void updateRestoreButtons()
+    {
+        if (!restoreGutter_)
+            return;
+        const auto area = viewport()->geometry();
+        restoreGutter_->setGeometry(area.right() + 1, area.top(), restoreGutterWidth, area.height());
+
+        qsizetype visible = 0;
+        const auto first = std::lower_bound(restoreRows_.cbegin(), restoreRows_.cend(), topLine());
+        for (auto row = first; row != restoreRows_.cend(); ++row) {
+            const auto block = document()->findBlockByNumber(*row);
+            if (!block.isValid())
+                break;
+            const auto bounds = blockBoundingGeometry(block).translated(contentOffset());
+            const int top = qRound(bounds.top());
+            if (top >= area.height())
+                break;
+            if (visible == restoreButtons_.size()) {
+                auto *button = new QToolButton(restoreGutter_);
+                button->setObjectName("restoreDiffHunk");
+                button->setArrowType(Qt::RightArrow);
+                button->setToolTip(tr("Restore this block from HEAD"));
+                button->setAccessibleName(button->toolTip());
+                connect(button, &QToolButton::clicked, this, [this, button] {
+                    restoreHunk_(button->property("hunkIndex").toLongLong());
+                });
+                restoreButtons_.append(button);
+            }
+            auto *button = restoreButtons_.at(visible++);
+            button->setProperty("hunkIndex", qsizetype(row - restoreRows_.cbegin()));
+            button->setGeometry(1, top, restoreGutterWidth - 2, qMax(1, qRound(bounds.height())));
+            button->show();
+        }
+        for (; visible < restoreButtons_.size(); ++visible)
+            restoreButtons_.at(visible)->hide();
     }
 
     void paintGutter()
@@ -244,6 +322,10 @@ private:
 
     Gutter side_;
     QWidget *gutter_;
+    QWidget *restoreGutter_ = nullptr;
+    std::function<void(qsizetype)> restoreHunk_;
+    QList<int> restoreRows_;
+    QList<QToolButton *> restoreButtons_;
     QList<Line> lines_;
     int digits_ = 2;
     bool fileDocument_ = false;
@@ -256,6 +338,8 @@ QStringList fileLines(const QString &text)
     auto lines = text.split(QLatin1Char('\n'));
     if (lines.last().isEmpty())
         lines.removeLast();
+    if (lines.first().startsWith(QChar::ByteOrderMark))
+        lines.first().removeFirst();
     for (auto &line : lines) {
         if (line.endsWith(QLatin1Char('\r')))
             line.chop(1);
@@ -272,6 +356,30 @@ QString comparisonText(QString text)
     text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
     return text.replace(u'\r', u'\n');
 }
+
+QString editorComparisonText(const QString &text)
+{
+    auto normalized = comparisonText(text);
+    if (normalized.startsWith(QChar::ByteOrderMark))
+        normalized.removeFirst();
+    return normalized;
+}
+
+QList<int> lineOffsets(QStringView text)
+{
+    QList<int> offsets{0};
+    for (qsizetype lineEnd = text.indexOf(u'\n'); lineEnd >= 0; lineEnd = text.indexOf(u'\n', lineEnd + 1))
+        offsets.append(int(lineEnd + 1));
+    if (offsets.last() != text.size())
+        offsets.append(int(text.size()));
+    return offsets;
+}
+
+struct RestoreRange {
+    int start;
+    int end;
+    QString text;
+};
 
 struct Comparison {
     QList<Line> before;
@@ -308,14 +416,16 @@ bool compare(const QStringList &before, const QStringList &after,
         appendContext(oldStart);
         out.alignedChanges.append(int(out.before.size()));
         out.unifiedChanges.append(int(out.unified.size()));
+        const auto words = DiffWordHighlights::compare(before, oldStart, hunk.oldCount,
+                                                       after, newStart, hunk.newCount);
         for (int i = 0; i < hunk.oldCount; ++i) {
-            Line line{before.at(oldLine), oldLine + 1, 0, Change::Removed};
+            Line line{before.at(oldLine), oldLine + 1, 0, Change::Removed, words.before.at(i)};
             out.before.append(line);
             out.unified.append(line);
             ++oldLine;
         }
         for (int i = 0; i < hunk.newCount; ++i) {
-            Line line{after.at(newLine), 0, newLine + 1, Change::Added};
+            Line line{after.at(newLine), 0, newLine + 1, Change::Added, words.after.at(i)};
             out.after.append(line);
             out.unified.append(line);
             ++newLine;
@@ -410,6 +520,8 @@ public:
         paired->setChildrenCollapsible(false);
         before_ = addPane(paired, DiffEditor::Before, "diffBefore", working_ ? tr("HEAD") : tr("Before"));
         after_ = addPane(paired, DiffEditor::After, "diffAfter", working_ ? tr("Working Tree") : tr("After"));
+        if (working_)
+            before_->enableRestoreGutter([this](qsizetype index) { restoreHunk(index); });
         paired->setSizes({420, 420});
         pages_->addWidget(paired);
         unified_ = new DiffEditor(DiffEditor::Unified, pages_);
@@ -460,6 +572,7 @@ public:
             connect(after_, &QPlainTextEdit::textChanged, this, [this] {
                 if (!editingFile_ || updatingEditors_)
                     return;
+                clearRestoreActions();
                 // Keep the document and its undo stack. Recompute only comparison metadata.
                 after_->setLines({}, false);
                 compareEdited_.start();
@@ -485,6 +598,7 @@ public:
         connect(&source_, &CommitDiffSource::failed, this, [this](const QString &error) {
             const bool duringRefresh = std::exchange(refreshingPreview_, false);
             refreshRequired_ |= duringRefresh;
+            clearRestoreActions();
             if (!editingFile_ && !duringRefresh)
                 clearEditors();
             status_->setText(error);
@@ -509,8 +623,10 @@ public:
         after_->reloadIfClean();
         if (after_->isReadOnly() && files_->currentItem())
             showFile(files_->currentItem());
-        else if (previous != after_->editorText())
+        else if (previous != after_->editorText()) {
+            clearRestoreActions();
             compareEdited_.start();
+        }
     }
 
 protected:
@@ -648,6 +764,7 @@ private:
         } else if (headChanged || diskChanged || refreshRequired_ || previousFile != fileFor(selected)) {
             displayedPath_ = displayPath(fileFor(selected));
             updateFileLabel();
+            clearRestoreActions();
             refreshingPreview_ = true;
             refreshRequired_ = false;
             source_.loadWorkingPreview(fileFor(selected));
@@ -656,6 +773,7 @@ private:
 
     void clearEditors()
     {
+        clearRestoreActions();
         editingFile_ = false;
         refreshingPreview_ = false;
         refreshRequired_ = false;
@@ -701,6 +819,7 @@ private:
 
     void showComparisonUnavailable(const QString &reason, bool refreshed)
     {
+        clearRestoreActions();
         if (refreshed && !editingFile_) {
             clearEditors();
         } else if (refreshed) {
@@ -736,14 +855,12 @@ private:
                 after_->clearFile();
                 mode_->setToolTip({});
             } else if (preview.unavailableReason.isEmpty()) {
-                auto expected = comparisonText(preview.after);
-                if (expected.startsWith(QChar::ByteOrderMark))
-                    expected.removeFirst();
-                if (expected != after_->editorText()) {
+                if (editorComparisonText(preview.after) != after_->editorText()) {
                     refreshRequired_ = true;
                     return;
                 }
-                workingBefore_ = comparisonText(preview.before);
+                workingBefore_ = editorComparisonText(preview.before);
+                workingHasHeadText_ = preview.hasHeadText;
             }
         }
         // If typing continued while Git was comparing snapshots, keep the newer buffer intact.
@@ -816,6 +933,71 @@ private:
             currentChange_ = std::min(currentChange_, int(alignedChanges_.size()) - 1);
             updateButtons();
         }
+        setRestoreActions(preview);
+    }
+
+    void clearRestoreActions()
+    {
+        restoreRanges_.clear();
+        before_->setRestoreRows({});
+    }
+
+    void setRestoreActions(const CommitDiffSource::Preview &preview)
+    {
+        clearRestoreActions();
+        if (!editingFile_ || !preview.hasHeadText || preview.hunks.isEmpty())
+            return;
+        const auto before = editorComparisonText(preview.before);
+        const auto after = editorComparisonText(preview.after);
+        if (after != after_->editorText() || before.count(u'\n') != preview.before.count(u'\n') ||
+            after.count(u'\n') != preview.after.count(u'\n'))
+            return;
+
+        // Line boundaries include the newline when present, including at EOF.
+        const auto oldOffsets = lineOffsets(before);
+        const auto newOffsets = lineOffsets(after);
+        QList<int> rows;
+        for (qsizetype index = 0; index < preview.hunks.size(); ++index) {
+            const auto &hunk = preview.hunks.at(index);
+            const int oldLine = hunk.oldStart - (hunk.oldCount > 0 ? 1 : 0);
+            const int newLine = hunk.newStart - (hunk.newCount > 0 ? 1 : 0);
+            if (oldLine + hunk.oldCount >= oldOffsets.size() || newLine + hunk.newCount >= newOffsets.size())
+                continue;
+            const int start = newOffsets.at(newLine);
+            const int end = newOffsets.at(newLine + hunk.newCount);
+            const int oldStart = oldOffsets.at(oldLine);
+            const auto text = QStringView(before).sliced(oldStart, oldOffsets.at(oldLine + hunk.oldCount) - oldStart);
+            if (text == QStringView(after).sliced(start, end - start) || text.contains(QChar::ParagraphSeparator))
+                continue;
+            restoreRanges_.append({start, end, text.toString()});
+            rows.append(alignedChanges_.at(index));
+        }
+        restoreRevision_ = after_->document()->revision();
+        before_->setRestoreRows(std::move(rows));
+    }
+
+    void restoreHunk(qsizetype index)
+    {
+        if (!editingFile_ || after_->isReadOnly() || index < 0 || index >= restoreRanges_.size() ||
+            after_->document()->revision() != restoreRevision_)
+            return;
+        if (source_.workingSnapshot(selectedWorkingPath()) != worktreeSnapshot_) {
+            clearRestoreActions();
+            refreshRequired_ = true;
+            source_.refreshWorkingFiles(selectedWorkingPath());
+            return;
+        }
+
+        const auto range = restoreRanges_.at(index);
+        QTextCursor cursor(after_->document());
+        cursor.setPosition(range.start);
+        cursor.setPosition(range.end, QTextCursor::KeepAnchor);
+        cursor.beginEditBlock();
+        cursor.insertText(range.text);
+        cursor.endEditBlock();
+        after_->setTextCursor(cursor);
+        after_->setFocus();
+        after_->flushAutosave();
     }
 
     void prepareEditors(const CommitDiffSource::Preview &preview)
@@ -848,7 +1030,8 @@ private:
             return;
         }
         editingFile_ = true;
-        workingBefore_ = comparisonText(preview.before);
+        workingBefore_ = editorComparisonText(preview.before);
+        workingHasHeadText_ = preview.hasHeadText;
         after_->setUndoRedoEnabled(true);
         after_->document()->setModified(false);
         mode_->setToolTip(tr("Edit the working file in Side by Side mode."));
@@ -862,6 +1045,7 @@ private:
         CommitDiffSource::Preview preview;
         preview.before = workingBefore_;
         preview.after = after_->editorText();
+        preview.hasHeadText = workingHasHeadText_;
         comparisonText_ = preview.after;
         if (preview.before.count(u'\n') + preview.after.count(u'\n') >= maxLines ||
             preview.after.toUtf8().size() > workingFileLimit) {
@@ -925,9 +1109,12 @@ private:
     QList<int> afterRows_;
     QList<int> alignedChanges_;
     QList<int> unifiedChanges_;
+    QList<RestoreRange> restoreRanges_;
+    int restoreRevision_ = 0;
     int currentChange_ = -1;
     bool syncingScroll_ = false;
     bool editingFile_ = false;
+    bool workingHasHeadText_ = false;
     bool updatingEditors_ = false;
     bool workingStateLoaded_ = false;
     bool refreshingPreview_ = false;

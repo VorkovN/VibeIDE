@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(VibeIDE VERSION 0.1.1 LANGUAGES CXX)
+project(VibeIDE VERSION 0.1.2 LANGUAGES CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     message(FATAL_ERROR "VibeIDE requires macOS.")
@@ -23,6 +23,7 @@ qt_add_executable(VibeIDE MACOSX_BUNDLE
     src/CommitDiffView.cpp
     src/CommitDiffSource.cpp
     src/CurrentChangesPanel.cpp
+    src/FileTransfer.cpp
     src/FilesPanel.cpp
     src/GitActions.cpp
     src/GitFileList.cpp

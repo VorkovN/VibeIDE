@@ -530,6 +530,7 @@ void CommitDiffSource::loadWorkingBefore(const File &file, Preview preview, bool
                             unavailable(tr("This file type has no text preview."));
                             return;
                         }
+                        preview.hasHeadText = metadata[0] == "100644" || metadata[0] == "100755";
                         loadBlob(metadata[2], [this, preview = std::move(preview), afterExists](QString before) mutable {
                             preview.before = std::move(before);
                             compareWorking(std::move(preview), true, afterExists);

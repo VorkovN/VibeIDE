@@ -41,6 +41,7 @@ public:
         QString after;
         QList<Hunk> hunks;
         QString unavailableReason;
+        bool hasHeadText = false;
     };
 
     struct WorkingState {

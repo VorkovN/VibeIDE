@@ -29,16 +29,25 @@ public:
     {
         const bool diffArrow = (element == PE_IndicatorArrowUp || element == PE_IndicatorArrowDown)
             && widget && widget->objectName() == QLatin1String("diffNavigation");
-        if (diffArrow) {
+        const bool restoreArrow = element == PE_IndicatorArrowRight
+            && widget && widget->objectName() == QLatin1String("restoreDiffHunk");
+        if (diffArrow || restoreArrow) {
             const QPointF center = QRectF(option->rect).center();
             const qreal direction = element == PE_IndicatorArrowUp ? -1 : 1;
             const auto role = option->state.testFlag(State_Enabled) ? QPalette::ButtonText : QPalette::PlaceholderText;
             painter->save();
             painter->setRenderHint(QPainter::Antialiasing);
             painter->setPen(QPen(option->palette.color(role), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            painter->drawPolyline(QPolygonF{center + QPointF(-4, -2 * direction),
-                                            center + QPointF(0, 2 * direction),
-                                            center + QPointF(4, -2 * direction)});
+            if (restoreArrow) {
+                painter->drawPolyline(QPolygonF{center + QPointF(-4, -3), center + QPointF(-1, 0),
+                                                center + QPointF(-4, 3)});
+                painter->drawPolyline(QPolygonF{center + QPointF(0, -3), center + QPointF(3, 0),
+                                                center + QPointF(0, 3)});
+            } else {
+                painter->drawPolyline(QPolygonF{center + QPointF(-4, -2 * direction),
+                                                center + QPointF(0, 2 * direction),
+                                                center + QPointF(4, -2 * direction)});
+            }
             painter->restore();
             return;
         }
@@ -142,6 +151,9 @@ QString themeStyleSheet(bool light)
             background: #222a38; color: palette(placeholder-text);
         }
         QToolButton#diffNavigation { padding: 0; }
+        QToolButton#restoreDiffHunk { background: transparent; border: 1px solid transparent; padding: 0; }
+        QToolButton#restoreDiffHunk:hover { background: palette(midlight); }
+        QToolButton#restoreDiffHunk:focus { border-color: #86a7eb; }
         QComboBox#diffMode { padding: 0 25px 0 9px; }
         QComboBox#diffMode::drop-down { subcontrol-origin: padding; width: 24px; border: 0; }
         QPushButton#runButton:enabled {
@@ -276,7 +288,7 @@ int main(int argc, char *argv[])
     app.setApplicationName(QStringLiteral("VibeIDE"));
     app.setApplicationDisplayName(QStringLiteral("VibeIDE"));
     app.setOrganizationName(QStringLiteral("VibeIDE"));
-    app.setApplicationVersion(QStringLiteral("0.1.1"));
+    app.setApplicationVersion(QStringLiteral("0.1.2"));
     const QDir executableDirectory(app.applicationDirPath());
     app.setWindowIcon(QIcon(executableDirectory.absoluteFilePath(QStringLiteral("../Resources/VibeIDE.png"))));
     initializeExecutablePath();
