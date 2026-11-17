@@ -2,16 +2,22 @@
 
 #include "SyntaxHighlighting.h"
 
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
 #include <QFontDatabase>
 #include <QSaveFile>
 #include <QScrollBar>
 #include <QStringDecoder>
+#include <QStringMatcher>
 #include <QTextDocument>
+
+#include <algorithm>
+#include <utility>
 
 namespace {
 constexpr auto utf8Bom = "\xef\xbb\xbf";
+constexpr qsizetype maxFullFindHighlights = 1024;
 
 bool readFile(const QString &path, qsizetype limit, QByteArray &bytes)
 {
@@ -43,6 +49,12 @@ TextFileEditor::TextFileEditor(QWidget *parent) : QPlainTextEdit(parent)
     connect(document(), &QTextDocument::contentsChanged, this, [this] {
         if (!isReadOnly() && !autosave_.isActive())
             autosave_.start();
+        if (!findText_.isEmpty())
+            rebuildFindMatches();
+    });
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this] {
+        if (findMatches_.size() > maxFullFindHighlights)
+            updateSelections();
     });
 }
 
@@ -214,4 +226,94 @@ void TextFileEditor::setSyntaxFileName(const QString &name)
         syntax_ = new SyntaxHighlighting(this);
     if (syntax_)
         syntax_->setFileName(name);
+}
+
+void TextFileEditor::setFindText(const QString &text)
+{
+    if (findText_ == text)
+        return;
+    findText_ = text;
+    rebuildFindMatches();
+}
+
+void TextFileEditor::rebuildFindMatches()
+{
+    findMatches_.clear();
+    if (!findText_.isEmpty()) {
+        const auto text = editorText();
+        const QStringMatcher matcher(findText_, Qt::CaseInsensitive);
+        for (qsizetype start = 0; (start = matcher.indexIn(text, start)) >= 0; start += findText_.size())
+            findMatches_.append(int(start));
+    }
+    updateSelections();
+    emit findMatchesChanged();
+}
+
+QTextCursor TextFileEditor::findCursor(int position) const
+{
+    QTextCursor cursor(document());
+    cursor.setPosition(position);
+    cursor.setPosition(position + int(findText_.size()), QTextCursor::KeepAnchor);
+    return cursor;
+}
+
+void TextFileEditor::stepFindMatch(bool backwards)
+{
+    if (findMatches_.isEmpty())
+        return;
+    const auto cursor = textCursor();
+    const auto begin = findMatches_.cbegin();
+    const auto end = findMatches_.cend();
+    const int position = backwards ? cursor.selectionStart() : cursor.selectionEnd();
+    auto next = std::lower_bound(begin, end, position);
+    if (backwards)
+        next = next == begin ? end - 1 : next - 1;
+    else if (next == end)
+        next = begin;
+    setTextCursor(findCursor(*next));
+    ensureCursorVisible();
+}
+
+void TextFileEditor::setBaseSelections(QList<QTextEdit::ExtraSelection> selections)
+{
+    baseSelections_ = std::move(selections);
+    updateSelections();
+}
+
+void TextFileEditor::updateSelections()
+{
+    auto selections = baseSelections_;
+    auto begin = findMatches_.cbegin();
+    // Scrollbar signals can arrive before contentsChanged during a document replacement.
+    const auto lastValidMatch = document()->characterCount() - 1 - findText_.size();
+    auto end = std::upper_bound(begin, findMatches_.cend(), lastValidMatch);
+    if (findMatches_.size() > maxFullFindHighlights) {
+        // Keep every match navigable, while formatting only visible blocks for dense searches.
+        const auto first = firstVisibleBlock();
+        const auto last = cursorForPosition(QPoint(0, viewport()->height())).block();
+        begin = std::lower_bound(begin, end, first.position() - findText_.size() + 1);
+        end = std::lower_bound(begin, end, last.position() + last.length());
+    }
+    if (begin != end) {
+        const bool dark = palette().color(QPalette::Base).lightness() < 128;
+        QTextCharFormat highlight;
+        highlight.setBackground(QColor(dark ? "#6b5018" : "#ffe29c"));
+        for (auto match = begin; match != end; ++match)
+            selections.append({findCursor(*match), highlight});
+    }
+    setExtraSelections(selections);
+}
+
+void TextFileEditor::changeEvent(QEvent *event)
+{
+    QPlainTextEdit::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange && !findMatches_.isEmpty())
+        updateSelections();
+}
+
+void TextFileEditor::resizeEvent(QResizeEvent *event)
+{
+    QPlainTextEdit::resizeEvent(event);
+    if (findMatches_.size() > maxFullFindHighlights)
+        updateSelections();
 }

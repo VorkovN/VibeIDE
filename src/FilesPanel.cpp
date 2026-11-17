@@ -1,6 +1,7 @@
 #include "FilesPanel.h"
 
 #include "FileTransfer.h"
+#include "FindBar.h"
 #include "TextFileEditor.h"
 
 #include <QAction>
@@ -20,6 +21,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QScopedValueRollback>
+#include <QShortcut>
 #include <QSortFilterProxyModel>
 #include <QSplitter>
 #include <QStyleOptionViewItem>
@@ -300,6 +302,11 @@ FilesPanel::FilesPanel(const QString &root, QWidget *parent)
     path_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     path_->hide();
     detailLayout->addWidget(path_);
+    auto *find = new FindBar(this);
+    detailLayout->addWidget(find);
+    auto *findShortcut = new QShortcut(QKeySequence::Find, this);
+    findShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(findShortcut, &QShortcut::activated, find, [this, find] { find->openFor(editor_); });
 
     editor_->setObjectName("fileEditor");
     editor_->setAccessibleName(tr("File editor"));

@@ -2,11 +2,13 @@
 
 #include "CommitDiffSource.h"
 #include "DiffWordHighlights.h"
+#include "FindBar.h"
 #include "GitFileList.h"
 #include "GitStatus.h"
 #include "TextFileEditor.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QComboBox>
 #include <QDir>
 #include <QFileInfo>
@@ -18,6 +20,7 @@
 #include <QPainter>
 #include <QScrollBar>
 #include <QScopedValueRollback>
+#include <QShortcut>
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -196,7 +199,7 @@ private:
                 selections.append(accent);
             }
         }
-        setExtraSelections(selections);
+        setBaseSelections(std::move(selections));
     }
 
     QColor background(Change change) const
@@ -538,6 +541,8 @@ public:
             autosaveStatus_->hide();
             viewLayout->addWidget(autosaveStatus_);
         }
+        find_ = new FindBar(this);
+        viewLayout->addWidget(find_);
         pages_ = new QStackedWidget(view);
         auto *paired = new QSplitter(Qt::Horizontal, pages_);
         paired->setChildrenCollapsible(false);
@@ -567,6 +572,19 @@ public:
             pages_->setCurrentIndex(index);
             if (currentChange_ >= 0)
                 goToChange(currentChange_);
+            find_->setEditor(pages_->isHidden() ? nullptr : findEditor());
+        });
+        connect(qApp, &QApplication::focusChanged, this, [this](QWidget *, QWidget *focus) {
+            if (focus == before_ || focus == after_) {
+                findBefore_ = focus == before_;
+                find_->setEditor(findEditor());
+            }
+        });
+        auto *findShortcut = new QShortcut(QKeySequence::Find, this);
+        findShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(findShortcut, &QShortcut::activated, this, [this] {
+            if (!pages_->isHidden())
+                find_->openFor(findEditor());
         });
         connect(files_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *item, QTreeWidgetItem *previous) {
             if (!item) {
@@ -686,6 +704,13 @@ protected:
     }
 
 private:
+    DiffEditor *findEditor() const
+    {
+        if (pages_->currentWidget() == unified_)
+            return unified_;
+        return findBefore_ ? before_ : after_;
+    }
+
     QToolButton *changeButton(const QString &label, Qt::ArrowType arrow,
                               const QKeySequence &shortcut, int direction)
     {
@@ -851,6 +876,7 @@ private:
 
     void clearEditors()
     {
+        find_->setEditor(nullptr);
         clearRestoreActions();
         editingFile_ = false;
         refreshingPreview_ = false;
@@ -1012,6 +1038,7 @@ private:
             updateButtons();
         }
         setRestoreActions(preview);
+        find_->setEditor(findEditor());
     }
 
     void clearRestoreActions()
@@ -1173,6 +1200,7 @@ private:
     QLabel *filePath_ = nullptr;
     QLabel *status_ = nullptr;
     QLabel *autosaveStatus_ = nullptr;
+    FindBar *find_ = nullptr;
     QStackedWidget *pages_ = nullptr;
     DiffEditor *before_ = nullptr;
     DiffEditor *after_ = nullptr;
@@ -1198,6 +1226,7 @@ private:
     bool workingStateLoaded_ = false;
     bool refreshingPreview_ = false;
     bool refreshRequired_ = false;
+    bool findBefore_ = false;
 };
 }
 

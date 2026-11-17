@@ -21,13 +21,25 @@ public:
     const QString &autosaveError() const { return autosaveError_; }
     QString editorText() const;
     void setSyntaxFileName(const QString &name);
+    void setFindText(const QString &text);
+    qsizetype findMatchCount() const { return findMatches_.size(); }
+    void stepFindMatch(bool backwards);
 
 signals:
     void saved();
     void autosaveErrorChanged(const QString &message);
+    void findMatchesChanged();
+
+protected:
+    void changeEvent(QEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
+    void setBaseSelections(QList<QTextEdit::ExtraSelection> selections);
 
 private:
     void setAutosaveError(const QString &message);
+    void rebuildFindMatches();
+    void updateSelections();
+    QTextCursor findCursor(int position) const;
 
     QString path_;
     QString target_;
@@ -38,4 +50,7 @@ private:
     qsizetype limit_ = 0;
     bool bom_ = false;
     SyntaxHighlighting *syntax_ = nullptr;
+    QString findText_;
+    QList<int> findMatches_;
+    QList<QTextEdit::ExtraSelection> baseSelections_;
 };

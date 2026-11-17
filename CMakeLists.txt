@@ -25,6 +25,7 @@ qt_add_executable(VibeIDE MACOSX_BUNDLE
     src/CurrentChangesPanel.cpp
     src/FileTransfer.cpp
     src/FilesPanel.cpp
+    src/FindBar.cpp
     src/GitActions.cpp
     src/GitFileList.cpp
     src/GitPanel.cpp
