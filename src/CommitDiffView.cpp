@@ -14,6 +14,7 @@
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPainter>
 #include <QScrollBar>
 #include <QScopedValueRollback>
@@ -482,7 +483,11 @@ public:
 
         auto *split = new QSplitter(Qt::Horizontal, this);
         split->setChildrenCollapsible(false);
-        files_ = new QTreeWidget(split);
+        auto *sidebar = new QWidget(split);
+        auto *sidebarLayout = new QVBoxLayout(sidebar);
+        sidebarLayout->setContentsMargins(0, 0, 0, 0);
+        sidebarLayout->setSpacing(4);
+        files_ = new QTreeWidget(sidebar);
         files_->setObjectName("diffFiles");
         files_->setAccessibleName(tr("Changed files"));
         files_->setHeaderLabels({tr("Changed files")});
@@ -490,8 +495,26 @@ public:
         files_->setUniformRowHeights(true);
         GitFileList::useStatusColors(*files_);
         files_->setTextElideMode(Qt::ElideMiddle);
-        files_->setMinimumWidth(130);
-        split->addWidget(files_);
+        sidebar->setMinimumWidth(working_ ? 170 : 130);
+        if (working_) {
+            files_->setHeaderHidden(true);
+            auto *headerWidget = new QWidget(sidebar);
+            headerWidget->setFixedHeight(26);
+            auto *header = new QHBoxLayout(headerWidget);
+            header->setContentsMargins(4, 0, 0, 0);
+            auto *label = new QLabel(tr("Changed files"), headerWidget);
+            label->setObjectName("muted");
+            header->addWidget(label, 1);
+            fileAction_ = new QToolButton(headerWidget);
+            fileAction_->setObjectName("workingFileAction");
+            fileAction_->setFixedHeight(26);
+            fileAction_->hide();
+            header->addWidget(fileAction_);
+            sidebarLayout->addWidget(headerWidget);
+            connect(fileAction_, &QToolButton::clicked, this, &DiffPage::applyFileAction);
+        }
+        sidebarLayout->addWidget(files_, 1);
+        split->addWidget(sidebar);
 
         auto *view = new QWidget(split);
         auto *viewLayout = new QVBoxLayout(view);
@@ -546,25 +569,42 @@ public:
                 goToChange(currentChange_);
         });
         connect(files_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *item, QTreeWidgetItem *previous) {
-            if (!item)
+            if (!item) {
+                updateFileAction();
                 return;
+            }
             if (auto *editor = workingEditor(); editor && !editor->flushAutosave()) {
                 const QSignalBlocker blocked(files_);
                 files_->setCurrentItem(previous);
                 return;
             }
             showFile(item);
+            updateFileAction();
         });
 
         if (working_) {
             worktreeRefresh_.setInterval(2000);
             connect(&worktreeRefresh_, &QTimer::timeout, this, [this] {
-                if (!after_->document()->isModified() && !compareEdited_.isActive())
+                if (!source_.workingFileActionInProgress() && !after_->document()->isModified() &&
+                    !compareEdited_.isActive())
                     source_.refreshWorkingFiles(selectedWorkingPath());
             });
             connect(&source_, &CommitDiffSource::workingStateReady, this,
                     [this, workingPath](const CommitDiffSource::WorkingState &state) {
                 updateWorkingState(state, workingPath);
+            });
+            connect(&source_, &CommitDiffSource::workingFileActionFinished, this, [this](const QString &error) {
+                files_->setEnabled(true);
+                pages_->setEnabled(true);
+                refreshRequired_ = true;
+                source_.loadWorkingFiles(selectedWorkingPath());
+                if (!error.isEmpty()) {
+                    auto *message = new QMessageBox(QMessageBox::Warning, tr("Could not apply file action"),
+                                                    error, QMessageBox::Ok, this);
+                    message->setTextFormat(Qt::PlainText);
+                    message->setAttribute(Qt::WA_DeleteOnClose);
+                    message->open();
+                }
             });
             compareEdited_.setSingleShot(true);
             compareEdited_.setInterval(180);
@@ -603,6 +643,7 @@ public:
                 clearEditors();
             status_->setText(error);
             status_->show();
+            updateFileAction();
         });
         clearEditors();
         status_->setText(tr("Loading changed files…"));
@@ -735,9 +776,45 @@ private:
         return item ? fileFor(item).workingPath : QByteArray{};
     }
 
+    void updateFileAction()
+    {
+        if (!fileAction_)
+            return;
+        using Action = CommitDiffSource::WorkingFileAction;
+        const auto *item = files_->currentItem();
+        const auto action = item ? CommitDiffSource::workingFileAction(fileFor(item)) : Action::None;
+        fileAction_->setVisible(action != Action::None);
+        fileAction_->setEnabled(!source_.workingFileActionInProgress());
+        if (action == Action::None)
+            return;
+        const bool restore = action == Action::RestoreDeleted;
+        fileAction_->setText(restore ? tr("Restore") : tr("Delete"));
+        const auto tooltip = restore ? tr("Restore this file from HEAD") : tr("Move this new file to Trash");
+        fileAction_->setToolTip(tooltip);
+        fileAction_->setAccessibleName(tooltip);
+    }
+
+    void applyFileAction()
+    {
+        const auto *item = files_->currentItem();
+        if (!item || source_.workingFileActionInProgress())
+            return;
+        const auto file = fileFor(item);
+        if (CommitDiffSource::workingFileAction(file) == CommitDiffSource::WorkingFileAction::None)
+            return;
+        if (auto *editor = workingEditor(); editor && !editor->flushAutosave())
+            return;
+
+        compareEdited_.stop();
+        fileAction_->setEnabled(false);
+        files_->setEnabled(false);
+        pages_->setEnabled(false);
+        source_.applyWorkingFileAction(file, worktreeHead_, worktreeSnapshot_);
+    }
+
     void updateWorkingState(const CommitDiffSource::WorkingState &state, const QByteArray &initialPath)
     {
-        if (after_->document()->isModified() || compareEdited_.isActive())
+        if (source_.workingFileActionInProgress() || after_->document()->isModified() || compareEdited_.isActive())
             return;
         const bool firstLoad = !workingStateLoaded_;
         workingStateLoaded_ = true;
@@ -746,6 +823,7 @@ private:
         const bool filesChanged = firstLoad || changedFiles_ != state.files;
         if (filesChanged)
             selected = populateFiles(state.files, firstLoad ? initialPath : previousFile.workingPath);
+        updateFileAction();
 
         const bool headChanged = worktreeHead_ != state.head;
         const bool diskChanged = worktreeSnapshot_ != state.selectedSnapshot;
@@ -1091,6 +1169,7 @@ private:
     QComboBox *mode_ = nullptr;
     QToolButton *previous_ = nullptr;
     QToolButton *next_ = nullptr;
+    QToolButton *fileAction_ = nullptr;
     QLabel *filePath_ = nullptr;
     QLabel *status_ = nullptr;
     QLabel *autosaveStatus_ = nullptr;

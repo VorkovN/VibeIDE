@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(VibeIDE VERSION 0.1.2 LANGUAGES CXX)
+project(VibeIDE VERSION 0.1.3 LANGUAGES CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     message(FATAL_ERROR "VibeIDE requires macOS.")

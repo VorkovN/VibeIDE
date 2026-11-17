@@ -50,6 +50,8 @@ public:
         QByteArray selectedSnapshot;
     };
 
+    enum class WorkingFileAction { None, DeleteAdded, RestoreDeleted };
+
     explicit CommitDiffSource(const QString &repository, QObject *parent = nullptr);
     ~CommitDiffSource() override;
 
@@ -61,11 +63,16 @@ public:
     void compareWorkingText(Preview preview);
     const QString &workingRoot() const { return workingRoot_; }
     QByteArray workingSnapshot(const QByteArray &path) const;
+    static WorkingFileAction workingFileAction(const File &file);
+    bool workingFileActionInProgress() const { return workingActionProcess_ != nullptr; }
+    void applyWorkingFileAction(const File &file, const QByteArray &expectedHead,
+                                const QByteArray &expectedSnapshot);
 
 signals:
     void filesReady(const QList<File> &files);
     void workingStateReady(const WorkingState &state);
     void previewReady(const Preview &preview);
+    void workingFileActionFinished(const QString &error);
     void failed(const QString &error);
 
 private:
@@ -84,10 +91,13 @@ private:
     void readWorkingState(const QByteArray &selectedPath, bool initial);
     void compareWorking(Preview preview, bool beforeExists, bool afterExists);
     void finishComparison(Preview preview, Result result);
+    void deleteWorkingAddition(const File &file, const QString &path, const QByteArray &expectedSnapshot);
+    void restoreWorkingDeletion(const File &file, const QString &path, const QByteArray &head);
+    void runWorkingAction(QStringList arguments, Completion completion, bool acceptsExitOne = false);
     bool decodeBlob(const QByteArray &data, QString &text);
     void unavailable(const QString &reason);
     void run(QStringList arguments, qsizetype limit, Completion completion,
-             const QString &directory = {}, bool acceptsExitOne = false);
+             const QString &directory = {}, bool acceptsExitOne = false, QProcess **slot = nullptr);
     void cancel();
 
     QString repository_;
@@ -95,4 +105,5 @@ private:
     QByteArray workingStatus_;
     QList<File> workingFiles_;
     QProcess *process_ = nullptr;
+    QProcess *workingActionProcess_ = nullptr;
 };

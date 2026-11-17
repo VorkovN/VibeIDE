@@ -2,9 +2,11 @@
 
 #include "GitStatus.h"
 
+#include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QPointer>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
@@ -141,6 +143,14 @@ QStringList hunkOptions()
             QStringLiteral("--inter-hunk-context=0")};
 }
 
+QStringList filePatchOptions(const QString &output)
+{
+    return {QStringLiteral("--no-color"), QStringLiteral("--no-ext-diff"),
+            QStringLiteral("--no-textconv"), QStringLiteral("--no-renames"), QStringLiteral("--binary"),
+            QStringLiteral("--src-prefix=a/"), QStringLiteral("--dst-prefix=b/"),
+            QStringLiteral("--output=") + output};
+}
+
 class Descriptor final
 {
 public:
@@ -166,6 +176,7 @@ struct WorktreeFile {
     WorktreeRead state;
     QByteArray bytes;
     QString error = {};
+    QByteArray identity = {};
 };
 
 WorktreeFile readFailure(int error)
@@ -185,6 +196,19 @@ bool sameSnapshot(const struct stat &before, const struct stat &after)
            before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec &&
            before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec &&
            before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec;
+}
+
+QByteArray snapshotIdentity(const struct stat &entry)
+{
+    QByteArray result;
+    for (const auto field : {qint64(entry.st_dev), qint64(entry.st_ino), qint64(entry.st_mode),
+                             qint64(entry.st_size), qint64(entry.st_mtimespec.tv_sec),
+                             qint64(entry.st_mtimespec.tv_nsec), qint64(entry.st_ctimespec.tv_sec),
+                             qint64(entry.st_ctimespec.tv_nsec)}) {
+        result += QByteArray::number(field);
+        result += '\0';
+    }
+    return result;
 }
 
 WorktreeFile readWorktreeFile(const QString &root, const QByteArray &path)
@@ -214,7 +238,8 @@ WorktreeFile readWorktreeFile(const QString &root, const QByteArray &path)
     if (::fstatat(directory.get(), basename, &before, AT_SYMLINK_NOFOLLOW) < 0)
         return readFailure(errno);
     if (before.st_size > BlobLimit)
-        return {WorktreeRead::Oversized, {}};
+        return {S_ISREG(before.st_mode) ? WorktreeRead::Oversized : WorktreeRead::Unsupported,
+                {}, {}, snapshotIdentity(before)};
 
     if (S_ISLNK(before.st_mode)) {
         QByteArray target(std::clamp<qsizetype>(before.st_size + 1, 1024, BlobLimit + 1),
@@ -227,7 +252,7 @@ WorktreeFile readWorktreeFile(const QString &root, const QByteArray &path)
         if (count == target.size() || count > BlobLimit)
             return {WorktreeRead::Oversized, {}};
         target.truncate(count);
-        return {WorktreeRead::Symlink, std::move(target)};
+        return {WorktreeRead::Symlink, std::move(target), {}, snapshotIdentity(after)};
     }
 
     if (!S_ISREG(before.st_mode))
@@ -258,7 +283,7 @@ WorktreeFile readWorktreeFile(const QString &root, const QByteArray &path)
     if (::fstatat(directory.get(), basename, &after, AT_SYMLINK_NOFOLLOW) < 0 || !sameSnapshot(before, after) ||
         bytes.size() != after.st_size)
         return {WorktreeRead::Changed, {}};
-    return {WorktreeRead::Text, std::move(bytes)};
+    return {WorktreeRead::Text, std::move(bytes), {}, snapshotIdentity(after)};
 }
 
 void addWholeFileHunk(CommitDiffSource::Preview &preview)
@@ -412,8 +437,184 @@ QByteArray CommitDiffSource::workingSnapshot(const QByteArray &path) const
 {
     auto file = readWorktreeFile(workingRoot_, path);
     QByteArray snapshot(1, static_cast<char>(file.state));
+    snapshot.append(std::move(file.identity));
     snapshot.append(std::move(file.bytes));
     return snapshot;
+}
+
+CommitDiffSource::WorkingFileAction CommitDiffSource::workingFileAction(const File &file)
+{
+    if (file.workingPath.isEmpty())
+        return WorkingFileAction::None;
+    if (file.newPath == file.workingPath && file.oldPath.isEmpty() &&
+        (file.status == "??" || file.status == "A " || file.status == "AM" || file.status == "AT"))
+        return WorkingFileAction::DeleteAdded;
+    if (file.oldPath == file.workingPath && file.newPath.isEmpty() &&
+        (file.status == " D" || file.status == "D " || file.status == "MD" || file.status == "TD"))
+        return WorkingFileAction::RestoreDeleted;
+    return WorkingFileAction::None;
+}
+
+void CommitDiffSource::applyWorkingFileAction(const File &file, const QByteArray &expectedHead,
+                                              const QByteArray &expectedSnapshot)
+{
+    if (workingFileActionInProgress())
+        return;
+    const auto action = workingFileAction(file);
+    const auto path = QString::fromUtf8(file.workingPath);
+    if (action == WorkingFileAction::None || workingRoot_.isEmpty() ||
+        path.toUtf8() != file.workingPath || file.workingPath.contains('\0')) {
+        emit workingFileActionFinished(tr("This changed file cannot be updated."));
+        return;
+    }
+
+    runWorkingAction({QStringLiteral("rev-parse"), QStringLiteral("--verify"), QStringLiteral("--quiet"),
+                      QStringLiteral("HEAD^{commit}")},
+        [this, action, file, path, expectedHead, expectedSnapshot](Result headResult) {
+            const auto head = headResult.data.trimmed();
+            if (!headResult.error.isEmpty() || headResult.oversized || head != expectedHead ||
+                (action == WorkingFileAction::RestoreDeleted && !validObject(head))) {
+                emit workingFileActionFinished(headResult.error.isEmpty()
+                    ? tr("Git HEAD changed. Select the file again to retry.") : headResult.error);
+                return;
+            }
+            auto arguments = GitStatus::arguments();
+            arguments.prepend(QStringLiteral("--literal-pathspecs"));
+            arguments << QStringLiteral("--") << path;
+            runWorkingAction(std::move(arguments), [this, action, file, path, head, expectedSnapshot](Result status) {
+                if (!status.error.isEmpty() || status.oversized) {
+                    emit workingFileActionFinished(status.error.isEmpty()
+                        ? tr("Could not verify the selected file's Git status.") : status.error);
+                    return;
+                }
+                const auto current = workingFiles(status.data);
+                if (!current.contains(file) || workingSnapshot(file.workingPath) != expectedSnapshot) {
+                    emit workingFileActionFinished(tr("The file changed. Select it again to retry."));
+                    return;
+                }
+                if (action == WorkingFileAction::DeleteAdded)
+                    deleteWorkingAddition(file, path, expectedSnapshot);
+                else
+                    restoreWorkingDeletion(file, path, head);
+            });
+        }, true);
+}
+
+void CommitDiffSource::deleteWorkingAddition(const File &file, const QString &path,
+                                              const QByteArray &expectedSnapshot)
+{
+    const auto kind = expectedSnapshot.isEmpty() ? WorktreeRead::Error
+        : static_cast<WorktreeRead>(expectedSnapshot.front());
+    if (kind != WorktreeRead::Text && kind != WorktreeRead::Symlink && kind != WorktreeRead::Oversized) {
+        emit workingFileActionFinished(tr("The selected file is no longer available to move to Trash."));
+        return;
+    }
+
+    const auto moveToTrash = [this, file, path, expectedSnapshot]() -> QString {
+        if (workingSnapshot(file.workingPath) != expectedSnapshot)
+            return tr("The file changed. Select it again to retry.");
+        QFile workingFile(workingRoot_ + u'/' + path);
+        return workingFile.moveToTrash() ? QString{}
+            : tr("Could not move the file to Trash. %1").arg(workingFile.errorString());
+    };
+    if (file.status == "??") {
+        emit workingFileActionFinished(moveToTrash());
+        return;
+    }
+
+    const auto patchDirectory = std::make_shared<QTemporaryDir>();
+    if (!patchDirectory->isValid()) {
+        emit workingFileActionFinished(tr("Could not prepare the file for removal from staging."));
+        return;
+    }
+    const auto patch = patchDirectory->filePath(QStringLiteral("added.patch"));
+    auto arguments = QStringList{QStringLiteral("--literal-pathspecs"), QStringLiteral("diff"),
+                                 QStringLiteral("--cached"), QStringLiteral("--diff-filter=A")};
+    arguments += filePatchOptions(patch);
+    arguments << QStringLiteral("--") << path;
+    runWorkingAction(std::move(arguments),
+        [this, patchDirectory, patch, moveToTrash](Result result) {
+            if (!result.error.isEmpty() || result.oversized || QFileInfo(patch).size() == 0) {
+                emit workingFileActionFinished(result.error.isEmpty()
+                    ? tr("The selected file is no longer staged as an addition.") : result.error);
+                return;
+            }
+            const auto error = moveToTrash();
+            if (!error.isEmpty()) {
+                emit workingFileActionFinished(error);
+                return;
+            }
+            // Reverse this addition only if its staged content still matches.
+            runWorkingAction({QStringLiteral("apply"), QStringLiteral("--cached"), QStringLiteral("--reverse"),
+                              QStringLiteral("--whitespace=nowarn"), QStringLiteral("--"), patch},
+                [this, patchDirectory](Result applied) {
+                    emit workingFileActionFinished(applied.error.isEmpty() && !applied.oversized ? QString{}
+                        : tr("The file is in Trash, but could not be removed from staging. %1")
+                            .arg(applied.error).trimmed());
+                });
+        });
+}
+
+void CommitDiffSource::restoreWorkingDeletion(const File &file, const QString &path, const QByteArray &head)
+{
+    if (readWorktreeFile(workingRoot_, file.workingPath).state != WorktreeRead::Missing) {
+        emit workingFileActionFinished(tr("The file path is already occupied."));
+        return;
+    }
+    const auto patchDirectory = std::make_shared<QTemporaryDir>();
+    if (!patchDirectory->isValid()) {
+        emit workingFileActionFinished(tr("Could not prepare the file for restoration."));
+        return;
+    }
+    const auto patch = patchDirectory->filePath(QStringLiteral("restore.patch"));
+    runWorkingAction({QStringLiteral("hash-object"), QStringLiteral("-t"), QStringLiteral("tree"),
+                      QStringLiteral("--stdin")},
+        [this, file, path, head, patchDirectory, patch](Result emptyTree) {
+            const auto empty = emptyTree.data.trimmed();
+            if (!emptyTree.error.isEmpty() || !validObject(empty)) {
+                emit workingFileActionFinished(emptyTree.error.isEmpty()
+                    ? tr("Could not prepare the file for restoration.") : emptyTree.error);
+                return;
+            }
+            auto arguments = QStringList{QStringLiteral("--literal-pathspecs"), QStringLiteral("diff-tree")};
+            arguments += filePatchOptions(patch);
+            arguments << QString::fromLatin1(empty) << QString::fromLatin1(head) << QStringLiteral("--") << path;
+            runWorkingAction(std::move(arguments),
+                [this, file, patchDirectory, patch](Result result) {
+                    if (!result.error.isEmpty() || result.oversized) {
+                        emit workingFileActionFinished(result.error.isEmpty()
+                            ? tr("Could not prepare the file for restoration.") : result.error);
+                        return;
+                    }
+                    QFile contents(patch);
+                    if (!contents.open(QIODevice::ReadOnly) || !contents.readLine(16 * 1024).startsWith("diff --git ")) {
+                        emit workingFileActionFinished(tr("The selected file is unavailable in HEAD."));
+                        return;
+                    }
+                    const auto mode = contents.readLine(64).trimmed();
+                    if (mode != "new file mode 100644" && mode != "new file mode 100755" &&
+                        mode != "new file mode 120000") {
+                        emit workingFileActionFinished(tr("This file type cannot be restored."));
+                        return;
+                    }
+
+                    // A creation patch refuses to replace anything already present at the destination.
+                    QStringList arguments{QStringLiteral("apply"), QStringLiteral("--whitespace=nowarn")};
+                    if (file.status.startsWith('D'))
+                        arguments.append(QStringLiteral("--index"));
+                    arguments << QStringLiteral("--") << patch;
+                    runWorkingAction(std::move(arguments), [this, patchDirectory](Result applied) {
+                        emit workingFileActionFinished(applied.oversized
+                            ? tr("Could not restore the selected file.") : applied.error);
+                    });
+                });
+        });
+}
+
+void CommitDiffSource::runWorkingAction(QStringList arguments, Completion completion, bool acceptsExitOne)
+{
+    run(std::move(arguments), ListLimit, std::move(completion), workingRoot_, acceptsExitOne,
+        &workingActionProcess_);
 }
 
 void CommitDiffSource::readWorkingState(const QByteArray &selectedPath, bool initial)
@@ -664,11 +865,17 @@ void CommitDiffSource::unavailable(const QString &reason)
 }
 
 void CommitDiffSource::run(QStringList arguments, qsizetype limit, Completion completion,
-                           const QString &directory, bool acceptsExitOne)
+                           const QString &directory, bool acceptsExitOne, QProcess **slot)
 {
-    cancel();
-    auto *process = new QProcess(this);
-    process_ = process;
+    if (!slot) {
+        cancel();
+        slot = &process_;
+    }
+    QObject *parent = this;
+    if (slot == &workingActionProcess_)
+        parent = QCoreApplication::instance();
+    auto *process = new QProcess(parent);
+    *slot = process;
     process->setWorkingDirectory(directory.isEmpty() ? repository_ : directory);
     process->setStandardInputFile(QProcess::nullDevice());
 
@@ -705,17 +912,17 @@ void CommitDiffSource::run(QStringList arguments, qsizetype limit, Completion co
         if (remaining > 0)
             output->diagnostics.append(diagnostics.constData(), std::min(diagnostics.size(), remaining));
     };
-    connect(process, &QProcess::readyReadStandardOutput, this, drain);
-    connect(process, &QProcess::readyReadStandardError, this, drain);
+    connect(process, &QProcess::readyReadStandardOutput, process, drain);
+    connect(process, &QProcess::readyReadStandardError, process, drain);
 
-    const auto finish = [this, process, completion = std::move(completion)](Result result) {
+    const auto finish = [owner = QPointer(this), slot, process, completion = std::move(completion)](Result result) {
         process->deleteLater();
-        if (process_ != process)
+        if (!owner || *slot != process)
             return;
-        process_ = nullptr;
+        *slot = nullptr;
         completion(std::move(result));
     };
-    connect(process, &QProcess::finished, this,
+    connect(process, &QProcess::finished, process,
         [process, output, drain, finish, acceptsExitOne](int code, QProcess::ExitStatus status) {
             drain();
             QString error;
@@ -728,7 +935,7 @@ void CommitDiffSource::run(QStringList arguments, qsizetype limit, Completion co
             }
             finish({std::move(output->data), std::move(error), output->oversized});
         });
-    connect(process, &QProcess::errorOccurred, this, [process, finish](QProcess::ProcessError error) {
+    connect(process, &QProcess::errorOccurred, process, [process, finish](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart)
             finish({{}, tr("Git could not start. %1").arg(process->errorString())});
     });
