@@ -341,7 +341,7 @@ int main(int argc, char *argv[])
     app.setApplicationName(QStringLiteral("VibeIDE"));
     app.setApplicationDisplayName(QStringLiteral("VibeIDE"));
     app.setOrganizationName(QStringLiteral("VibeIDE"));
-    app.setApplicationVersion(QStringLiteral("0.1.5"));
+    app.setApplicationVersion(QStringLiteral("0.1.6"));
     const QDir executableDirectory(app.applicationDirPath());
     app.setWindowIcon(QIcon(executableDirectory.absoluteFilePath(QStringLiteral("../Resources/VibeIDE.png"))));
     initializeExecutablePath();

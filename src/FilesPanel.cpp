@@ -10,6 +10,7 @@
 #include <QDir>
 #include <QDrag>
 #include <QDragEnterEvent>
+#include <QFile>
 #include <QFileInfo>
 #include <QFileSystemModel>
 #include <QGuiApplication>
@@ -25,6 +26,7 @@
 #include <QPainterPath>
 #include <QPixmap>
 #include <QScopedValueRollback>
+#include <QSettings>
 #include <QShortcut>
 #include <QSortFilterProxyModel>
 #include <QSplitter>
@@ -38,6 +40,9 @@
 
 namespace {
 constexpr qsizetype previewLimit = 256 * 1024;
+const auto showDotfilesKey = QStringLiteral("files/showDotfiles");
+const QKeySequence moveToTrashKey(Qt::CTRL | Qt::Key_Backspace);
+const QKeySequence showDotfilesKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Period);
 
 QIcon projectEntryIcon(const QColor &ink, bool folder)
 {
@@ -91,13 +96,30 @@ QIcon projectEntryIcon(const QColor &ink, bool folder)
 class ProjectFiles final : public QSortFilterProxyModel
 {
 public:
-    explicit ProjectFiles(QObject *parent)
-        : QSortFilterProxyModel(parent),
+    ProjectFiles(const QModelIndex &sourceRoot, QObject *parent)
+        : QSortFilterProxyModel(parent), sourceRoot_(sourceRoot),
+          showDotfiles_(QSettings().value(showDotfilesKey, false).toBool()),
           lightFolder_(projectEntryIcon(QColor("#467c68"), true)),
           darkFolder_(projectEntryIcon(QColor("#7fb8a2"), true)),
           lightFile_(projectEntryIcon(QColor("#63736b"), false)),
           darkFile_(projectEntryIcon(QColor("#94a69d"), false))
     {
+    }
+
+    bool showDotfiles() const { return showDotfiles_; }
+
+    void setShowDotfiles(bool show)
+    {
+        if (showDotfiles_ == show)
+            return;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+        beginFilterChange();
+        showDotfiles_ = show;
+        endFilterChange(Direction::Rows);
+#else
+        showDotfiles_ = show;
+        invalidateRowsFilter();
+#endif
     }
 
     QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override
@@ -114,10 +136,23 @@ protected:
     bool filterAcceptsRow(int row, const QModelIndex &parent) const override
     {
         const auto index = sourceModel()->index(row, 0, parent);
-        return index.data(QFileSystemModel::FileNameRole).toString() != QStringLiteral(".git");
+        const auto name = index.data(QFileSystemModel::FileNameRole).toString();
+        if (name == QStringLiteral(".git"))
+            return false;
+        if (showDotfiles_ || !name.startsWith(u'.'))
+            return true;
+
+        // Dotted ancestors can contain the project root, which still needs a proxy index.
+        for (QModelIndex ancestor = sourceRoot_; ancestor.isValid(); ancestor = ancestor.parent()) {
+            if (ancestor == index)
+                return true;
+        }
+        return false;
     }
 
 private:
+    const QPersistentModelIndex sourceRoot_;
+    bool showDotfiles_;
     const QIcon lightFolder_;
     const QIcon darkFolder_;
     const QIcon lightFile_;
@@ -133,6 +168,17 @@ public:
         setSelectionMode(ExtendedSelection);
         setSelectionBehavior(SelectRows);
         setDragDropMode(DragDrop);
+
+        auto *trash = new QShortcut(this);
+        trash->setKeys({moveToTrashKey, QKeySequence(Qt::CTRL | Qt::Key_Delete)});
+        trash->setContext(Qt::WidgetShortcut);
+        trash->setAutoRepeat(false);
+        connect(trash, &QShortcut::activated, this, &ProjectFileTree::trashSelection);
+
+        auto *dotfiles = new QShortcut(showDotfilesKeySequence, panel_);
+        dotfiles->setContext(Qt::WidgetWithChildrenShortcut);
+        dotfiles->setAutoRepeat(false);
+        connect(dotfiles, &QShortcut::activated, this, &ProjectFileTree::toggleDotfiles);
     }
 
 protected:
@@ -159,7 +205,19 @@ protected:
         QMenu menu(this);
         auto *copy = menu.addAction(FilesPanel::tr("Copy"));
         auto *paste = menu.addAction(FilesPanel::tr("Paste"));
-        copy->setEnabled(!selectionPaths().isEmpty());
+        auto *trash = menu.addAction(FilesPanel::tr("Move to Trash"));
+        trash->setObjectName("filesMoveToTrash");
+        trash->setShortcut(moveToTrashKey);
+        menu.addSeparator();
+        auto *dotfiles = menu.addAction(FilesPanel::tr("Show Dotfiles"));
+        dotfiles->setObjectName("filesShowDotfiles");
+        dotfiles->setCheckable(true);
+        dotfiles->setChecked(model() && static_cast<const ProjectFiles *>(model())->showDotfiles());
+        dotfiles->setShortcut(showDotfilesKeySequence);
+        dotfiles->setEnabled(model());
+        const bool hasSelection = !selectionPaths().isEmpty();
+        copy->setEnabled(hasSelection);
+        trash->setEnabled(hasSelection);
         paste->setEnabled(!folder.isEmpty() &&
                           !localPaths(QGuiApplication::clipboard()->mimeData()).isEmpty());
         const auto *chosen = menu.exec(event->globalPos());
@@ -167,6 +225,10 @@ protected:
             copySelection();
         else if (chosen == paste)
             pasteInto(folder);
+        else if (chosen == trash)
+            trashSelection();
+        else if (chosen == dotfiles)
+            toggleDotfiles();
     }
 
     void startDrag(Qt::DropActions) override
@@ -315,11 +377,52 @@ private:
         transfer(localPaths(QGuiApplication::clipboard()->mimeData()), folder, Qt::CopyAction);
     }
 
-    bool prepareTransfer()
+    void trashSelection()
+    {
+        const auto paths = selectionPaths();
+        if (paths.isEmpty())
+            return;
+        const auto title = FilesPanel::tr("Move to Trash");
+        if (!std::ranges::all_of(paths, [this](const QString &path) {
+                const QFileInfo source(path);
+                return source.fileName() != QStringLiteral(".git") &&
+                       insideProject(source.dir().canonicalPath());
+            })) {
+            QMessageBox::warning(this, title, FilesPanel::tr("A selected item is outside the project files."));
+            return;
+        }
+        if (!prepareTransfer(title))
+            return;
+
+        QStringList errors;
+        for (const auto &path : paths) {
+            QFile file(path);
+            if (!file.moveToTrash())
+                errors.append(FilesPanel::tr("%1 — %2").arg(QFileInfo(path).fileName(), file.errorString()));
+        }
+        panel_->reloadIfClean();
+        if (!errors.isEmpty()) {
+            QMessageBox message(QMessageBox::Warning, title, errors.join(u'\n'), QMessageBox::Ok, this);
+            message.setTextFormat(Qt::PlainText);
+            message.exec();
+        }
+    }
+
+    void toggleDotfiles()
+    {
+        auto *files = static_cast<ProjectFiles *>(model());
+        if (!files)
+            return;
+        const bool show = !files->showDotfiles();
+        QSettings().setValue(showDotfilesKey, show);
+        files->setShowDotfiles(show);
+    }
+
+    bool prepareTransfer(const QString &title = FilesPanel::tr("File transfer"))
     {
         if (panel_->flushAutosave())
             return true;
-        QMessageBox::warning(this, FilesPanel::tr("File transfer"), panel_->autosaveError());
+        QMessageBox::warning(this, title, panel_->autosaveError());
         return false;
     }
 
@@ -414,7 +517,16 @@ const QString &FilesPanel::autosaveError() const
 
 void FilesPanel::reloadIfClean()
 {
-    editor_->reloadIfClean();
+    const QFileInfo opened(openedPath_);
+    if (!openedPath_.isEmpty() && !editor_->document()->isModified() && !opened.exists() && !opened.isSymLink()) {
+        tree_->selectionModel()->clearCurrentIndex();
+        openedIndex_ = QPersistentModelIndex{};
+        openedPath_.clear();
+        relativePath_.clear();
+        editor_->clearFile(tr("Select a file to open."));
+    } else {
+        editor_->reloadIfClean();
+    }
     updatePath();
 }
 
@@ -422,6 +534,7 @@ void FilesPanel::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
     if (model_) {
+        static_cast<ProjectFiles *>(tree_->model())->setShowDotfiles(QSettings().value(showDotfilesKey, false).toBool());
         reloadIfClean();
         return;
     }
@@ -433,7 +546,8 @@ void FilesPanel::showEvent(QShowEvent *event)
     model_ = new QFileSystemModel(this);
     model_->setFilter(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden);
     model_->setOption(QFileSystemModel::DontUseCustomDirectoryIcons);
-    auto *files = new ProjectFiles(this);
+    const auto rootIndex = model_->setRootPath(root_);
+    auto *files = new ProjectFiles(rootIndex, this);
     files->setSourceModel(model_);
     // The view can select a neighboring row as the model removes the open file.
     const auto beginModelChange = [this] { ++modelChanges_; };
@@ -447,7 +561,7 @@ void FilesPanel::showEvent(QShowEvent *event)
     };
     connect(files, &QAbstractItemModel::rowsRemoved, this, endModelChange);
     connect(files, &QAbstractItemModel::modelReset, this, endModelChange);
-    tree_->setRootIndex(files->mapFromSource(model_->setRootPath(root_)));
+    tree_->setRootIndex(files->mapFromSource(rootIndex));
     for (int column = 1; column < files->columnCount(); ++column)
         tree_->hideColumn(column);
     tree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
