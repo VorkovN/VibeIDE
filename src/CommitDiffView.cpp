@@ -13,7 +13,6 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QFontDatabase>
-#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
@@ -87,6 +86,7 @@ public:
         setLineWrapMode(NoWrap);
         const auto font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
         setFont(font);
+        document()->setDocumentMargin(7);
         setTabStopDistance(fontMetrics().horizontalAdvance(QLatin1Char(' ')) * 4);
         setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
@@ -206,9 +206,9 @@ private:
     {
         const bool dark = palette().color(QPalette::Base).lightness() < 128;
         switch (change) {
-        case Change::Added: return QColor(dark ? "#203e36" : "#d8f2e1");
-        case Change::Removed: return QColor(dark ? "#482e39" : "#f9dce0");
-        case Change::Padding: return QColor(dark ? "#202836" : "#eceff2");
+        case Change::Added: return QColor(dark ? "#1b352b" : "#e2f5e9");
+        case Change::Removed: return QColor(dark ? "#38272f" : "#fbe9ea");
+        case Change::Padding: return QColor(dark ? "#202125" : "#efefee");
         case Change::None: return palette().color(QPalette::AlternateBase);
         }
         return {};
@@ -217,8 +217,8 @@ private:
     QColor changedWordBackground(Change change) const
     {
         const bool dark = palette().color(QPalette::Base).lightness() < 128;
-        return QColor(change == Change::Added ? (dark ? "#30624b" : "#a5e2bd")
-                                               : (dark ? "#713e49" : "#f5b5c0"));
+        return QColor(change == Change::Added ? (dark ? "#306047" : "#b2e6c9")
+                                               : (dark ? "#70444e" : "#f6c2cb"));
     }
 
     int numberWidth() const
@@ -286,7 +286,10 @@ private:
         QPainter painter(gutter_);
         painter.fillRect(gutter_->rect(), background(Change::None));
         const auto ink = palette().color(QPalette::PlaceholderText);
+        const bool dark = palette().color(QPalette::Base).lightness() < 128;
         const int width = numberWidth();
+        painter.setPen(palette().color(QPalette::Mid));
+        painter.drawLine(gutter_->width() - 1, 0, gutter_->width() - 1, gutter_->height());
         int rowHeight = fontMetrics().height();
         for (auto block = firstVisibleBlock();
              block.isValid() && (fileDocument_ || block.blockNumber() < lines_.size());
@@ -298,8 +301,14 @@ private:
             rowHeight = qMax(1, qRound(bounds.bottom()) - top);
             const int number = block.blockNumber();
             const auto line = lines_.value(number);
-            if (line.change != Change::None)
+            if (line.change != Change::None) {
                 painter.fillRect(0, top, gutter_->width(), rowHeight, background(line.change));
+                if (line.change != Change::Padding) {
+                    const auto marker = line.change == Change::Added ? QColor(dark ? "#4c9476" : "#74b799")
+                                                                    : QColor(dark ? "#a5606c" : "#d79da6");
+                    painter.fillRect(gutter_->width() - 2, top, 2, rowHeight, marker);
+                }
+            }
             painter.setPen(ink);
             const auto drawNumber = [&](int number, int x) {
                 if (number > 0)
@@ -312,16 +321,12 @@ private:
                 drawNumber(fileDocument_ ? number + 1 : line.newNumber, side_ == Unified ? width : 0);
             if (side_ == Unified && (line.change == Change::Added || line.change == Change::Removed)) {
                 const bool added = line.change == Change::Added;
-                painter.setPen(palette().color(QPalette::Base).lightness() < 128
+                painter.setPen(dark
                     ? QColor(added ? "#8de5a6" : "#ff9c9c") : QColor(added ? "#116425" : "#a42222"));
                 painter.drawText(QRect(width * 2, top, 15, rowHeight),
                                  Qt::AlignCenter, added ? QStringLiteral("+") : QStringLiteral("−"));
             }
         }
-        QColor divider = ink;
-        divider.setAlpha(80);
-        painter.setPen(divider);
-        painter.drawLine(gutter_->width() - 1, 0, gutter_->width() - 1, gutter_->height());
     }
 
     Gutter side_;
@@ -458,7 +463,8 @@ public:
         setProperty("commitHash", hash);
 
         auto *layout = new QVBoxLayout(this);
-        layout->setContentsMargins(8, 8, 8, 8);
+        layout->setContentsMargins(10, 9, 10, 10);
+        layout->setSpacing(7);
         auto *toolbar = new QHBoxLayout;
         toolbar->setSpacing(6);
         previous_ = changeButton(tr("Previous change (Shift+F7)"), Qt::UpArrow, Qt::SHIFT | Qt::Key_F7, -1);
@@ -476,6 +482,7 @@ public:
         } else {
             toolbar->addSpacing(6);
             auto *description = new QLabel(hash.left(12) + QStringLiteral("  ") + subject, this);
+            description->setObjectName("diffCommitSummary");
             description->setTextFormat(Qt::PlainText);
             description->setToolTip(hash + QLatin1Char('\n') + subject);
             description->setWordWrap(true);
@@ -486,43 +493,46 @@ public:
 
         auto *split = new QSplitter(Qt::Horizontal, this);
         split->setChildrenCollapsible(false);
+        split->setHandleWidth(10);
         auto *sidebar = new QWidget(split);
         auto *sidebarLayout = new QVBoxLayout(sidebar);
         sidebarLayout->setContentsMargins(0, 0, 0, 0);
-        sidebarLayout->setSpacing(4);
+        sidebarLayout->setSpacing(5);
         files_ = new QTreeWidget(sidebar);
         files_->setObjectName("diffFiles");
         files_->setAccessibleName(tr("Changed files"));
-        files_->setHeaderLabels({tr("Changed files")});
+        files_->setHeaderHidden(true);
         files_->setRootIsDecorated(false);
         files_->setUniformRowHeights(true);
         GitFileList::useStatusColors(*files_);
         files_->setTextElideMode(Qt::ElideMiddle);
         sidebar->setMinimumWidth(working_ ? 170 : 130);
+        auto *headerWidget = new QWidget(sidebar);
+        headerWidget->setMinimumHeight(28);
+        auto *header = new QHBoxLayout(headerWidget);
+        header->setContentsMargins(3, 0, 0, 0);
+        auto *label = new QLabel(tr("Changed files"), headerWidget);
+        label->setObjectName("panelCaption");
+        header->addWidget(label, 1);
         if (working_) {
-            files_->setHeaderHidden(true);
-            auto *headerWidget = new QWidget(sidebar);
-            headerWidget->setFixedHeight(26);
-            auto *header = new QHBoxLayout(headerWidget);
-            header->setContentsMargins(4, 0, 0, 0);
-            auto *label = new QLabel(tr("Changed files"), headerWidget);
-            label->setObjectName("muted");
-            header->addWidget(label, 1);
             fileAction_ = new QToolButton(headerWidget);
             fileAction_->setObjectName("workingFileAction");
             fileAction_->setFixedHeight(26);
             fileAction_->hide();
             header->addWidget(fileAction_);
-            sidebarLayout->addWidget(headerWidget);
             connect(fileAction_, &QToolButton::clicked, this, &DiffPage::applyFileAction);
         }
+        sidebarLayout->addWidget(headerWidget);
         sidebarLayout->addWidget(files_, 1);
         split->addWidget(sidebar);
 
         auto *view = new QWidget(split);
         auto *viewLayout = new QVBoxLayout(view);
         viewLayout->setContentsMargins(0, 0, 0, 0);
+        viewLayout->setSpacing(5);
         filePath_ = new QLabel(view);
+        filePath_->setObjectName("editorPath");
+        filePath_->setMinimumHeight(28);
         filePath_->setTextFormat(Qt::PlainText);
         filePath_->setTextInteractionFlags(Qt::TextSelectableByMouse);
         filePath_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -546,6 +556,7 @@ public:
         pages_ = new QStackedWidget(view);
         auto *paired = new QSplitter(Qt::Horizontal, pages_);
         paired->setChildrenCollapsible(false);
+        paired->setHandleWidth(8);
         before_ = addPane(paired, DiffEditor::Before, "diffBefore", working_ ? tr("HEAD") : tr("Before"));
         after_ = addPane(paired, DiffEditor::After, "diffAfter", working_ ? tr("Working Tree") : tr("After"));
         if (working_)
@@ -558,7 +569,7 @@ public:
         pages_->addWidget(unified_);
         viewLayout->addWidget(pages_, 1);
         split->addWidget(view);
-        split->setSizes({265, 835});
+        split->setSizes({238, 862});
         split->setStretchFactor(1, 1);
         layout->addWidget(split, 1);
 
@@ -747,9 +758,10 @@ private:
         auto *pane = new QWidget(parent);
         auto *layout = new QVBoxLayout(pane);
         layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(3);
+        layout->setSpacing(5);
         auto *heading = new QLabel(label, pane);
-        heading->setObjectName("muted");
+        heading->setObjectName("panelCaption");
+        heading->setContentsMargins(3, 0, 0, 0);
         layout->addWidget(heading);
         auto *editor = new DiffEditor(side, pane);
         editor->setObjectName(QString::fromLatin1(name));

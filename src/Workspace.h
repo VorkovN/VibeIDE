@@ -7,9 +7,9 @@
 
 class QLabel;
 class QCloseEvent;
+class QPushButton;
 class QStackedWidget;
 class QTabBar;
-class QToolButton;
 class ProjectView;
 
 class Workspace final : public QMainWindow
@@ -46,7 +46,7 @@ private:
     QJsonObject closedRunConfigurations_;
     QString lastProject_[GroupCount];
     Group group_ = Cpp;
-    QToolButton *groups_[GroupCount]{};
+    QPushButton *groups_[GroupCount]{};
     QLabel *counts_[GroupCount]{};
     QTabBar *tabs_ = nullptr;
     QStackedWidget *configurationStack_ = nullptr;

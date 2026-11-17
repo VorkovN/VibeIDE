@@ -14,12 +14,16 @@
 #include <QFileSystemModel>
 #include <QGuiApplication>
 #include <QHeaderView>
+#include <QIcon>
 #include <QItemSelectionModel>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
 #include <QScopedValueRollback>
 #include <QShortcut>
 #include <QSortFilterProxyModel>
@@ -35,10 +39,76 @@
 namespace {
 constexpr qsizetype previewLimit = 256 * 1024;
 
+QIcon projectEntryIcon(const QColor &ink, bool folder)
+{
+    QIcon icon;
+    for (int scale : {1, 2}) {
+        QPixmap pixmap(16 * scale, 16 * scale);
+        pixmap.setDevicePixelRatio(scale);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(ink, 1.25, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        QPainterPath outline;
+        if (folder) {
+            QColor fill = ink;
+            fill.setAlpha(42);
+            painter.setBrush(fill);
+            outline.moveTo(2, 12.4);
+            outline.lineTo(2, 4.5);
+            outline.quadTo(2, 3.5, 3, 3.5);
+            outline.lineTo(6, 3.5);
+            outline.lineTo(7.5, 5.25);
+            outline.lineTo(13, 5.25);
+            outline.quadTo(14, 5.25, 14, 6.25);
+            outline.lineTo(14, 12.4);
+            outline.quadTo(14, 13.4, 13, 13.4);
+            outline.lineTo(3, 13.4);
+            outline.quadTo(2, 13.4, 2, 12.4);
+            outline.closeSubpath();
+        } else {
+            outline.moveTo(4, 2);
+            outline.lineTo(9, 2);
+            outline.lineTo(12.5, 5.5);
+            outline.lineTo(12.5, 14);
+            outline.lineTo(4, 14);
+            outline.closeSubpath();
+            outline.moveTo(9, 2);
+            outline.lineTo(9, 5.5);
+            outline.lineTo(12.5, 5.5);
+            outline.moveTo(6.25, 8.5);
+            outline.lineTo(10.25, 8.5);
+            outline.moveTo(6.25, 11);
+            outline.lineTo(9, 11);
+        }
+        painter.drawPath(outline);
+        painter.end();
+        icon.addPixmap(pixmap);
+    }
+    return icon;
+}
+
 class ProjectFiles final : public QSortFilterProxyModel
 {
 public:
-    using QSortFilterProxyModel::QSortFilterProxyModel;
+    explicit ProjectFiles(QObject *parent)
+        : QSortFilterProxyModel(parent),
+          lightFolder_(projectEntryIcon(QColor("#467c68"), true)),
+          darkFolder_(projectEntryIcon(QColor("#7fb8a2"), true)),
+          lightFile_(projectEntryIcon(QColor("#63736b"), false)),
+          darkFile_(projectEntryIcon(QColor("#94a69d"), false))
+    {
+    }
+
+    QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override
+    {
+        if (role != Qt::DecorationRole || !index.isValid() || index.column() != 0)
+            return QSortFilterProxyModel::data(index, role);
+        const auto *files = static_cast<const QFileSystemModel *>(sourceModel());
+        const bool directory = files->isDir(mapToSource(index));
+        const bool dark = QGuiApplication::palette().color(QPalette::Base).lightness() < 128;
+        return directory ? (dark ? darkFolder_ : lightFolder_) : (dark ? darkFile_ : lightFile_);
+    }
 
 protected:
     bool filterAcceptsRow(int row, const QModelIndex &parent) const override
@@ -46,6 +116,12 @@ protected:
         const auto index = sourceModel()->index(row, 0, parent);
         return index.data(QFileSystemModel::FileNameRole).toString() != QStringLiteral(".git");
     }
+
+private:
+    const QIcon lightFolder_;
+    const QIcon darkFolder_;
+    const QIcon lightFile_;
+    const QIcon darkFile_;
 };
 
 class ProjectFileTree final : public QTreeView
@@ -281,22 +357,28 @@ FilesPanel::FilesPanel(const QString &root, QWidget *parent)
     , editor_(new TextFileEditor(this))
 {
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(8, 8, 8, 8);
+    layout->setContentsMargins(10, 9, 10, 10);
     auto *split = new QSplitter(Qt::Horizontal, this);
     split->setChildrenCollapsible(false);
+    split->setHandleWidth(10);
     layout->addWidget(split);
 
     tree_->setObjectName("directoryTree");
     tree_->setAccessibleName(tr("Project files"));
     tree_->setHeaderHidden(true);
     tree_->setUniformRowHeights(true);
+    tree_->setIndentation(16);
+    tree_->setIconSize(QSize(16, 16));
     tree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     split->addWidget(tree_);
 
     auto *details = new QWidget(split);
     auto *detailLayout = new QVBoxLayout(details);
     detailLayout->setContentsMargins(0, 0, 0, 0);
-    detailLayout->setSpacing(4);
+    detailLayout->setSpacing(5);
+    path_->setObjectName("editorPath");
+    path_->setContentsMargins(3, 0, 0, 0);
+    path_->setMinimumHeight(28);
     path_->setTextFormat(Qt::PlainText);
     path_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     path_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -310,12 +392,13 @@ FilesPanel::FilesPanel(const QString &root, QWidget *parent)
 
     editor_->setObjectName("fileEditor");
     editor_->setAccessibleName(tr("File editor"));
+    editor_->document()->setDocumentMargin(10);
     editor_->clearFile(tr("Select a file to open."));
     connect(editor_->document(), &QTextDocument::modificationChanged, this, &FilesPanel::updatePath);
     connect(editor_, &TextFileEditor::autosaveErrorChanged, this, &FilesPanel::updatePath);
     detailLayout->addWidget(editor_, 1);
     split->addWidget(details);
-    split->setSizes({280, 720});
+    split->setSizes({238, 762});
     split->setStretchFactor(1, 1);
 }
 

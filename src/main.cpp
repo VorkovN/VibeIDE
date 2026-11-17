@@ -27,6 +27,21 @@ public:
     void drawPrimitive(PrimitiveElement element, const QStyleOption *option, QPainter *painter,
                        const QWidget *widget = nullptr) const override
     {
+        if (element == PE_IndicatorBranch) {
+            if (option->state.testFlag(State_Children)) {
+                const auto center = QRectF(option->rect).center();
+                const bool open = option->state.testFlag(State_Open);
+                painter->save();
+                painter->setRenderHint(QPainter::Antialiasing);
+                painter->setPen(QPen(option->palette.color(QPalette::PlaceholderText), 1.4,
+                                     Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                painter->translate(center);
+                painter->rotate(open ? 90 : option->direction == Qt::RightToLeft ? 180 : 0);
+                painter->drawPolyline(QPolygonF{QPointF(-1.5, -3), QPointF(1.5, 0), QPointF(-1.5, 3)});
+                painter->restore();
+            }
+            return;
+        }
         const bool diffArrow = (element == PE_IndicatorArrowUp || element == PE_IndicatorArrowDown)
             && widget && widget->objectName() == QLatin1String("diffNavigation");
         const bool restoreArrow = element == PE_IndicatorArrowRight
@@ -59,19 +74,16 @@ public:
         const bool enabled = option->state.testFlag(State_Enabled);
         const bool pressed = enabled && option->state.testFlag(State_Sunken);
         const bool hovered = enabled && option->state.testFlag(State_MouseOver);
-        const bool dark = option->palette.color(QPalette::Base).lightness() < 128;
         const QPointF center = QRectF(option->rect).center();
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing);
         if (hovered || pressed) {
             painter->setPen(Qt::NoPen);
-            painter->setBrush(QColor(dark ? (pressed ? "#29364b" : "#3a4962") : (pressed ? "#c4d3e7" : "#dde7f3")));
+            painter->setBrush(option->palette.color(pressed ? QPalette::Highlight : QPalette::Midlight));
             painter->drawRoundedRect(QRectF(center.x() - 7, center.y() - 7, 14, 14), 3, 3);
         }
 
-        QColor ink(dark ? "#a9b6cc" : "#52647d");
-        if (hovered || pressed)
-            ink = QColor(dark ? "#e7ebf2" : "#253b59");
+        auto ink = option->palette.color((hovered || pressed) ? QPalette::WindowText : QPalette::PlaceholderText);
         if (!enabled)
             ink.setAlpha(120);
         painter->setPen(QPen(ink, 1.25, Qt::SolidLine, Qt::RoundCap));
@@ -99,144 +111,185 @@ QPalette themePalette(bool light)
     const auto set = [&](QPalette::ColorRole role, const char *dark, const char *bright) {
         palette.setColor(role, QColor(light ? bright : dark));
     };
-    set(QPalette::Window, "#1b212d", "#f7f9fc");
-    set(QPalette::WindowText, "#e3e8f2", "#202941");
-    set(QPalette::Base, "#151b25", "#ffffff");
-    set(QPalette::AlternateBase, "#19212e", "#f2f6fb");
-    set(QPalette::Text, "#e3e8f2", "#202941");
-    set(QPalette::Button, "#253044", "#f9fbfd");
-    set(QPalette::ButtonText, "#e3e8f2", "#202941");
-    set(QPalette::Highlight, "#374e7c", "#dbe7fd");
-    set(QPalette::HighlightedText, "#ffffff", "#192d52");
-    set(QPalette::ToolTipBase, "#253044", "#f9fbfd");
-    set(QPalette::ToolTipText, "#e3e8f2", "#202941");
-    set(QPalette::PlaceholderText, "#a5b4ce", "#52647d");
-    set(QPalette::Mid, "#2d3a50", "#cbd7e7");
-    set(QPalette::Light, "#39485d", "#ffffff");
-    set(QPalette::Midlight, "#293548", "#f0f4f9");
-    set(QPalette::Dark, "#151b25", "#b9c7db");
-    set(QPalette::Shadow, "#0d1119", "#96a6bd");
-    set(QPalette::Link, "#8fc5ff", "#284f90");
-    set(QPalette::LinkVisited, "#c398f4", "#6940a0");
+    set(QPalette::Window, "#202124", "#f7f7f5");
+    set(QPalette::WindowText, "#eceef1", "#24262b");
+    set(QPalette::Base, "#17181b", "#fefefd");
+    set(QPalette::AlternateBase, "#1c1d20", "#f6f6f5");
+    set(QPalette::Text, "#eceef1", "#24262b");
+    set(QPalette::Button, "#26282d", "#f0f0ef");
+    set(QPalette::ButtonText, "#eceef1", "#24262b");
+    set(QPalette::Highlight, "#343941", "#e7eaf0");
+    set(QPalette::HighlightedText, "#f2f4f8", "#262c35");
+    set(QPalette::ToolTipBase, "#2b2d32", "#fafaf8");
+    set(QPalette::ToolTipText, "#eceef1", "#24262b");
+    set(QPalette::PlaceholderText, "#adb1ba", "#5d626c");
+    set(QPalette::Mid, "#34363c", "#dedfdf");
+    set(QPalette::Light, "#41434a", "#ffffff");
+    set(QPalette::Midlight, "#2d2f35", "#e9e9e8");
+    set(QPalette::Dark, "#141519", "#cfd0d2");
+    set(QPalette::Shadow, "#0d0e10", "#b1b4bb");
+    set(QPalette::Link, "#86cdb3", "#21654f");
+    set(QPalette::LinkVisited, "#c3a4ed", "#6c448c");
     for (const auto role : {QPalette::WindowText, QPalette::Text, QPalette::ButtonText})
-        palette.setColor(QPalette::Disabled, role, QColor(light ? "#6a778b" : "#8995aa"));
+        palette.setColor(QPalette::Disabled, role, QColor(light ? "#757981" : "#858994"));
     return palette;
 }
 
 QString themeStyleSheet(bool light)
 {
     auto sheet = QStringLiteral(R"qss(
-        QWidget#workspace { background: #111721; }
-        QWidget#sidebar { background: #151b25; border-right: 1px solid palette(mid); }
-        QWidget#projectStrip, QWidget#footer { background: #1a2230; }
+        QWidget#shell, QWidget#workspace, QWidget#projectStrip, QWidget#footer { background: @canvas; }
+        QWidget#sidebar { background: @sidebar; border-right: 1px solid palette(mid); }
         QWidget#projectStrip { border-bottom: 1px solid palette(mid); }
         QWidget#footer { border-top: 1px solid palette(mid); }
-        QLabel#brand { color: palette(window-text); font-size: 14px; font-weight: 700; }
-        QLabel#sectionLabel { color: palette(placeholder-text); font-size: 10px; font-weight: 700; }
-        QLabel#muted, QLabel#sessionStatus, QLabel#groupCount { color: palette(placeholder-text); }
-        QLabel#groupCount { min-width: 19px; font-size: 11px; }
-        QLabel#emptyTitle { color: palette(window-text); font-size: 23px; font-weight: 600; }
-        QTabWidget#projectViews, QWidget#terminalPanel {
-            background: #1b2331; border: 1px solid palette(mid); border-radius: 6px;
+        QLabel#brand { color: palette(window-text); font-size: 18px; font-weight: 700; }
+        QLabel#sectionLabel { color: palette(placeholder-text); font-size: 10px; font-weight: 600; }
+        QLabel#muted, QLabel#sessionStatus, QLabel#diffCommitSummary, QLabel#fileFindCount {
+            color: palette(placeholder-text);
         }
-        QWidget#runBar { background: #222c3d; }
-        QPushButton, QToolButton, QComboBox#diffMode {
-            background: #273348; border: 1px solid palette(mid);
-            border-radius: 4px; padding: 5px 9px;
+        QLabel#sessionStatus, QWidget#footer QLabel { font-size: 11px; }
+        QLabel#groupCount { color: palette(placeholder-text); font-size: 11px; }
+        QLabel#emptyTitle { color: palette(window-text); font-size: 24px; font-weight: 650; }
+        QLabel#editorPath { color: palette(window-text); font-size: 13px; font-weight: 600; }
+        QLabel#panelCaption { color: palette(placeholder-text); font-size: 11px; font-weight: 600; }
+
+        QTabWidget#projectViews::pane, QWidget#terminalPanel {
+            background: @panel; border: 1px solid palette(mid); border-radius: 10px;
         }
-        QPushButton:hover, QToolButton:hover, QComboBox#diffMode:hover { background: #354563; }
-        QPushButton:focus, QToolButton:focus, QComboBox#diffMode:focus { border-color: #86a7eb; }
-        QPushButton:pressed, QToolButton:pressed, QComboBox#diffMode:on { background: #1b2538; }
-        QPushButton:disabled, QToolButton:disabled, QComboBox#diffMode:disabled {
-            background: #222a38; color: palette(placeholder-text);
+        QTabWidget#terminalTabs::pane { border: 0; border-top: 1px solid palette(mid); }
+        QWidget#runBar { background: palette(alternate-base); }
+        QSplitter::handle { background: transparent; }
+        QSplitter::handle:hover { background: palette(midlight); }
+
+        QPushButton, QToolButton, QComboBox {
+            background: palette(button); border: 1px solid palette(mid); border-radius: 6px;
+            padding: 5px 10px; color: palette(button-text);
         }
-        QToolButton#diffNavigation { padding: 0; }
-        QToolButton#restoreDiffHunk { background: transparent; border: 1px solid transparent; padding: 0; }
-        QToolButton#restoreDiffHunk:hover { background: palette(midlight); }
-        QToolButton#restoreDiffHunk:focus { border-color: #86a7eb; }
-        QComboBox#diffMode { padding: 0 25px 0 9px; }
-        QComboBox#diffMode::drop-down { subcontrol-origin: padding; width: 24px; border: 0; }
+        QPushButton:hover, QToolButton:hover, QComboBox:hover { background: palette(midlight); }
+        QPushButton:focus, QToolButton:focus, QComboBox:focus { border-color: palette(link); }
+        QPushButton:pressed, QToolButton:pressed, QComboBox:on { background: palette(highlight); }
+        QPushButton:disabled, QToolButton:disabled, QComboBox:disabled {
+            background: transparent; color: palette(placeholder-text); border-color: palette(mid);
+        }
+        QComboBox { padding-right: 22px; }
+        QComboBox::drop-down { subcontrol-origin: padding; width: 20px; border: 0; }
+        QComboBox#diffMode { padding: 0 25px 0 8px; }
+        QToolButton#diffNavigation, QToolButton#terminalAdd { padding: 0; }
+        QToolButton#restoreDiffHunk, QToolButton#fileFindClose {
+            background: transparent; border: 1px solid transparent; padding: 0;
+        }
+        QToolButton#restoreDiffHunk:hover, QToolButton#fileFindClose:hover { background: palette(midlight); }
+        QToolButton#restoreDiffHunk:focus, QToolButton#fileFindClose:focus { border-color: palette(link); }
+        QPushButton#gitFetch, QPushButton#gitAdd { background: transparent; border-color: transparent; }
+        QPushButton#gitFetch:hover, QPushButton#gitAdd:hover { background: palette(midlight); }
+        QPushButton#gitFetch:focus, QPushButton#gitAdd:focus { border-color: palette(link); }
+        QPushButton#gitCommit:enabled {
+            background: @accentSurface; border-color: @accentBorder; color: palette(link);
+            font-weight: 600;
+        }
+        QPushButton#gitCommit:enabled:hover { background: @accentHover; }
+        QPushButton#gitCommit:enabled:focus { border-color: palette(link); }
         QPushButton#runButton:enabled {
-            background: #24704e; border-color: #3a956c; color: #f2fff8; min-width: 34px;
+            background: #21644b; border-color: #30795c; color: #f1fff7; min-width: 34px;
         }
-        QPushButton#runButton:enabled:hover { background: #2d805b; }
-        QPushButton#runButton:enabled:pressed { background: #1e5d41; }
+        QPushButton#runButton:enabled:hover { background: #287659; }
+        QPushButton#runButton:enabled:pressed { background: #1a553f; }
         QPushButton#runButton[running="true"]:enabled {
-            background: #a64452; border-color: #d06571; color: #fff5f6;
+            background: #963f50; border-color: #af5768; color: #fff5f7;
         }
-        QPushButton#runButton[running="true"]:enabled:hover { background: #b54d5c; }
-        QPushButton#runButton[running="true"]:enabled:pressed { background: #873844; }
-        QPushButton#runButton:enabled:focus { border-color: #b4c9ee; }
+        QPushButton#runButton[running="true"]:enabled:hover { background: #a94d60; }
+        QPushButton#runButton[running="true"]:enabled:pressed { background: #823544; }
+        QPushButton#runButton:enabled:focus { border-color: palette(link); }
         QPushButton#primary {
-            background: #a9c6ff; color: #16243f; border-color: #b9d1ff;
-            font-weight: 700; padding: 8px 16px;
+            background: @primary; color: @primaryInk; border-color: @primary;
+            font-weight: 600; padding: 7px 14px;
         }
-        QPushButton#primary:hover { background: #c5d8ff; }
-        QWidget#groupRow { border: 1px solid transparent; border-radius: 4px; }
-        QWidget#groupRow[active="true"] { background: #26364f; border-color: #3c5273; }
-        QToolButton#groupButton {
-            background: transparent; border: 1px solid transparent;
-            text-align: left; padding: 7px 8px; font-weight: 600;
+        QPushButton#primary:hover { background: @primaryHover; }
+
+        QWidget#groupRow { border: 1px solid transparent; border-radius: 8px; }
+        QWidget#groupRow[active="true"] { background: palette(highlight); border-color: palette(mid); }
+        QPushButton#groupButton {
+            background: transparent; border: 1px solid transparent; text-align: left;
+            padding: 4px 6px; font-weight: 600;
         }
-        QToolButton#groupButton:hover { background: #263349; }
-        QToolButton#groupButton:focus { border-color: #86a7eb; }
-        QToolButton#groupButton:checked { color: #c9dcff; }
-        QToolButton#groupAdd { padding: 0; }
+        QPushButton#groupButton:hover, QToolButton#groupAdd:hover { background: palette(midlight); }
+        QPushButton#groupButton:focus, QToolButton#groupAdd:focus { border-color: palette(link); }
+        QPushButton#groupButton:checked { color: palette(highlighted-text); }
+        QToolButton#groupAdd { background: transparent; border-color: transparent; padding: 0; }
+
         QTabBar::tab {
-            background: #1a2230; color: #b6c2d8;
-            padding: 6px 9px; border: 1px solid transparent;
+            background: transparent; color: palette(placeholder-text);
+            padding: 6px 9px; margin: 2px; border: 1px solid transparent; border-radius: 7px;
         }
-        QTabBar::tab:selected {
-            background: #29374e; color: #f4f7ff;
-            border: 1px solid #3c4e6a;
-        }
-        QTabBar::tab:hover:!selected { background: #232f44; }
-        QTabBar#projectTabs::tab { padding: 7px 9px; }
-        QTabWidget#projectViews QTabBar::tab { padding: 7px 12px; }
-        QTreeView#directoryTree::item { padding: 3px 4px; }
-        QTreeView#directoryTree::item:hover:!selected { background: #202c40; }
-        QHeaderView::section {
-            background: #263146; border: 0; border-right: 1px solid palette(mid); padding: 4px 6px;
-        }
+        QTabBar::tab:selected { background: palette(midlight); color: palette(window-text); }
+        QTabBar::tab:hover:!selected { background: palette(button); color: palette(window-text); }
+        QTabBar#contentTabs::tab { padding: 7px 9px; }
+        QTabBar#terminalTabBar::tab { padding: 4px 8px; }
+        QTabBar QToolButton { padding: 0; }
+
         QTreeView, QListView, QPlainTextEdit {
-            border: 1px solid palette(mid);
+            background: palette(base); border: 1px solid palette(mid); border-radius: 6px;
+            selection-background-color: palette(highlight); selection-color: palette(highlighted-text);
+            outline: 0;
+        }
+        QTreeView#directoryTree::item, QTreeView#diffFiles::item, QTreeView#currentChanges::item {
+            padding: 3px 6px;
+        }
+        QTreeView::item:hover:!selected, QListView::item:hover:!selected { background: palette(midlight); }
+        QTreeView::item:selected, QListView::item:selected { background: palette(highlight); }
+        QHeaderView::section {
+            background: palette(alternate-base); color: palette(placeholder-text);
+            border: 0; border-bottom: 1px solid palette(mid); padding: 6px 8px; font-weight: 600;
+        }
+        QLineEdit {
+            background: palette(base); color: palette(text); border: 1px solid palette(mid);
+            border-radius: 6px; padding: 5px 8px;
             selection-background-color: palette(highlight); selection-color: palette(highlighted-text);
         }
-    )qss");
-    if (!light)
-        return sheet;
+        QLineEdit:focus { border-color: palette(link); }
+        QWidget#fileFindBar { background: palette(alternate-base); border: 1px solid palette(mid); border-radius: 7px; }
+        QLineEdit#fileFindInput { padding: 3px 7px; }
 
-    struct ColorPair { const char *dark; const char *light; };
-    static constexpr ColorPair colors[]{
-        {"#111721", "#f7f9fc"},
-        {"#151b25", "#f0f4f9"},
-        {"#1a2230", "#edf2f8"},
-        {"#1b2331", "#f7f9fc"},
-        {"#222c3d", "#edf2f8"},
-        {"#273348", "#f9fbfd"},
-        {"#354563", "#e4edf8"},
-        {"#86a7eb", "#446eae"},
-        {"#1b2538", "#d5e2f1"},
-        {"#222a38", "#edf1f6"},
-        {"#a9c6ff", "#c9defd"},
-        {"#16243f", "#192d52"},
-        {"#b9d1ff", "#acc7ed"},
-        {"#c5d8ff", "#b7d2f8"},
-        {"#26364f", "#dbe7fd"},
-        {"#3c5273", "#b2c7e5"},
-        {"#263349", "#e2ebf7"},
-        {"#c9dcff", "#274e85"},
-        {"#b6c2d8", "#4b5f7a"},
-        {"#29374e", "#fff"},
-        {"#f4f7ff", "#192d52"},
-        {"#3c4e6a", "#c7d6ea"},
-        {"#232f44", "#e2ebf7"},
-        {"#202c40", "#e9f1fc"},
-        {"#263146", "#edf2f8"},
-        {"#b4c9ee", "#243e64"},
+        QScrollBar { background: transparent; border: 0; }
+        QScrollBar:vertical { width: 9px; }
+        QScrollBar:horizontal { height: 9px; }
+        QScrollBar::handle { background: @scrollThumb; border: 2px solid palette(base); border-radius: 4px; }
+        QScrollBar::handle:vertical { min-height: 22px; }
+        QScrollBar::handle:horizontal { min-width: 22px; }
+        QScrollBar::handle:hover { background: @scrollHover; }
+        QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+        QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+
+        QMenu {
+            background: palette(window); border: 1px solid palette(mid);
+            border-radius: 7px; padding: 4px;
+        }
+        QMenu::item { padding: 5px 20px 5px 9px; border-radius: 4px; }
+        QMenu::item:selected { background: palette(highlight); color: palette(highlighted-text); }
+        QMenu::separator { height: 1px; background: palette(mid); margin: 3px; }
+        QToolTip { padding: 4px; border: 1px solid palette(mid); }
+    )qss");
+
+    struct Color {
+        const char *name;
+        const char *dark;
+        const char *bright;
+    };
+    constexpr Color colors[]{
+        {"@canvas", "#191a1d", "#f3f3f1"},
+        {"@sidebar", "#202124", "#ececea"},
+        {"@panel", "#1e1f22", "#fafaf9"},
+        {"@accentSurface", "#25342f", "#edf5f1"},
+        {"@accentBorder", "#3b574d", "#c4dacf"},
+        {"@accentHover", "#2d453a", "#dfede6"},
+        {"@primaryInk", "#142b23", "#ffffff"},
+        {"@primaryHover", "#a1ddc7", "#28775d"},
+        {"@primary", "#86cdb3", "#21654f"},
+        {"@scrollThumb", "#5b6069", "#b0b3b8"},
+        {"@scrollHover", "#757a85", "#92979f"},
     };
     for (const auto &color : colors)
-        sheet.replace(QLatin1String(color.dark), QLatin1String(color.light));
+        sheet.replace(QLatin1String(color.name), QLatin1String(light ? color.bright : color.dark));
     return sheet;
 }
 
@@ -288,7 +341,7 @@ int main(int argc, char *argv[])
     app.setApplicationName(QStringLiteral("VibeIDE"));
     app.setApplicationDisplayName(QStringLiteral("VibeIDE"));
     app.setOrganizationName(QStringLiteral("VibeIDE"));
-    app.setApplicationVersion(QStringLiteral("0.1.4"));
+    app.setApplicationVersion(QStringLiteral("0.1.5"));
     const QDir executableDirectory(app.applicationDirPath());
     app.setWindowIcon(QIcon(executableDirectory.absoluteFilePath(QStringLiteral("../Resources/VibeIDE.png"))));
     initializeExecutablePath();

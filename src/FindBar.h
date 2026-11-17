@@ -6,6 +6,7 @@
 class QAction;
 class QLabel;
 class QLineEdit;
+class QPropertyAnimation;
 class TextFileEditor;
 
 class FindBar final : public QWidget
@@ -23,6 +24,7 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    void animateOpen();
     void updateSearch();
     void updateMatchCount();
 
@@ -31,4 +33,5 @@ private:
     QLineEdit *input_;
     QLabel *matchCount_;
     QAction *escape_;
+    QPropertyAnimation *reveal_ = nullptr;
 };

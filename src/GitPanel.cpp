@@ -31,7 +31,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <utility>
 
 namespace {
@@ -157,11 +156,11 @@ namespace {
 QColor laneColor(int color, bool dark)
 {
     static const std::array<QColor, laneColorCount> darkColors = {
-        QColor("#69a8ff"), QColor("#55c89b"), QColor("#c398f4"),
-        QColor("#f4bd6a"), QColor("#ee88ae"), QColor("#58cbd9")};
+        QColor("#80b2f8"), QColor("#75e2b5"), QColor("#bfacf4"),
+        QColor("#e8bd80"), QColor("#e999bf"), QColor("#72cfd0")};
     static const std::array<QColor, laneColorCount> lightColors = {
-        QColor("#1468cc"), QColor("#09825c"), QColor("#8754bd"),
-        QColor("#a7680c"), QColor("#ba4975"), QColor("#107d8a")};
+        QColor("#3266ae"), QColor("#167352"), QColor("#7256ac"),
+        QColor("#926223"), QColor("#aa496f"), QColor("#16747d")};
     return (dark ? darkColors : lightColors)[color];
 }
 
@@ -187,7 +186,7 @@ public:
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
     {
         auto size = QStyledItemDelegate::sizeHint(option, index);
-        size.setHeight(qMax(size.height(), 28));
+        size.setHeight(qMax(size.height(), 31));
         if (index.column() == changesColumn)
             size.setWidth(qMax(size.width(), option.fontMetrics.horizontalAdvance(index.data().toString()) + 12));
         return size;
@@ -196,39 +195,49 @@ public:
     void paint(QPainter *painter, const QStyleOptionViewItem &option,
                const QModelIndex &index) const override
     {
-        if (index.column() > 1 && index.column() != changesColumn) {
-            QStyledItemDelegate::paint(painter, option, index);
-            return;
-        }
         const auto *item = static_cast<const HistoryItem *>(tree_->itemFromIndex(index));
         if (!item)
             return;
         QStyleOptionViewItem row = option;
         initStyleOption(&row, index);
-        row.text.clear();
+        const auto text = std::exchange(row.text, {});
         tree_->style()->drawControl(QStyle::CE_ItemViewItem, &row, painter, tree_);
 
         painter->save();
         painter->setClipRect(row.rect, Qt::IntersectClip);
         const bool selected = row.state.testFlag(QStyle::State_Selected);
-        const auto background = row.palette.color(selected ? QPalette::Highlight : QPalette::Base);
+        const auto base = row.features.testFlag(QStyleOptionViewItem::Alternate)
+            ? QPalette::AlternateBase : QPalette::Base;
+        const auto background = row.palette.color(selected ? QPalette::Highlight : base);
         const bool dark = background.lightness() < 128;
         if (index.column() == 0)
-            paintGraph(*painter, row, *item, dark);
+            paintGraph(*painter, row, *item, background, dark);
         else if (index.column() == 1)
             paintSummary(*painter, row, *item, dark);
-        else
+        else if (index.column() == changesColumn)
             paintChanges(*painter, row, index.data(changeCountsRole).toStringList(), dark);
+        else
+            paintMetadata(*painter, row, text);
         painter->restore();
     }
 
 private:
+    static void paintMetadata(QPainter &painter, const QStyleOptionViewItem &row, const QString &text)
+    {
+        const bool selected = row.state.testFlag(QStyle::State_Selected);
+        const auto content = row.rect.adjusted(7, 0, -7, 0);
+        painter.setFont(row.font);
+        painter.setPen(row.palette.color(selected ? QPalette::HighlightedText : QPalette::PlaceholderText));
+        painter.drawText(content, row.displayAlignment | Qt::AlignVCenter,
+                         row.fontMetrics.elidedText(text, Qt::ElideRight, content.width()));
+    }
+
     static void paintChanges(QPainter &painter, const QStyleOptionViewItem &row,
                              const QStringList &counts, bool dark)
     {
         const bool selected = row.state.testFlag(QStyle::State_Selected);
-        const auto text = row.palette.color(selected ? QPalette::HighlightedText : QPalette::Text);
-        QRect content = row.rect.adjusted(5, 0, -5, 0);
+        const auto text = row.palette.color(selected ? QPalette::HighlightedText : QPalette::PlaceholderText);
+        QRect content = row.rect.adjusted(7, 0, -5, 0);
         painter.setFont(row.font);
         if (counts.isEmpty()) {
             painter.setPen(text);
@@ -236,17 +245,18 @@ private:
             return;
         }
 
-        const std::array colors{QColor(dark ? "#8de5a6" : "#116425"),
-                                QColor(dark ? "#ff9c9c" : "#a42222"), text};
+        const std::array colors{QColor(dark ? "#86e3ad" : "#167342"),
+                                QColor(dark ? "#ffa2ae" : "#a53549")};
         for (qsizetype i = 0; i < qMin<qsizetype>(counts.size(), colors.size()); ++i) {
-            painter.setPen(colors[i]);
-            painter.drawText(content, Qt::AlignVCenter, counts.at(i));
-            content.setLeft(content.left() + row.fontMetrics.horizontalAdvance(counts.at(i) + QStringLiteral("  ")));
+            const auto &count = counts.at(i);
+            painter.setPen(count.size() == 2 && count.endsWith(u'0') ? text : colors[i]);
+            painter.drawText(content, Qt::AlignVCenter, count);
+            content.setLeft(content.left() + row.fontMetrics.horizontalAdvance(count + QStringLiteral("  ")));
         }
     }
 
     static void paintGraph(QPainter &painter, const QStyleOptionViewItem &row,
-                           const HistoryItem &item, bool dark)
+                           const HistoryItem &item, const QColor &background, bool dark)
     {
         painter.setRenderHint(QPainter::Antialiasing);
         const auto x = [&row](int lane) { return row.rect.left() + graphMargin + lane * laneSpacing; };
@@ -256,86 +266,111 @@ private:
         const int node = x(item.node.lane);
         const QColor nodeColor = laneColor(item.node.color, dark);
         for (const auto &edge : item.continuing) {
-            painter.setPen(QPen(laneColor(edge.color, dark), 1.7));
+            painter.setPen(QPen(laneColor(edge.color, dark), 1.5, Qt::SolidLine, Qt::FlatCap));
             painter.drawLine(x(edge.lane), top, x(edge.lane), bottom);
         }
         if (item.incoming) {
-            painter.setPen(QPen(nodeColor, 1.7));
+            painter.setPen(QPen(nodeColor, 1.5, Qt::SolidLine, Qt::FlatCap));
             painter.drawLine(node, top, node, middle);
         }
         for (const auto &edge : item.parents) {
-            painter.setPen(QPen(laneColor(edge.color, dark), 1.7));
+            painter.setPen(QPen(laneColor(edge.color, dark), 1.5, Qt::SolidLine, Qt::FlatCap));
             if (edge.lane == item.node.lane) {
                 painter.drawLine(node, middle, node, bottom);
             } else {
                 const int target = x(edge.lane);
                 QPainterPath connection(QPointF(node, middle));
-                connection.cubicTo(target, middle, target, (middle + bottom) / 2, target, bottom);
+                const qreal control = node + (target - node) * 0.68;
+                connection.cubicTo(control, middle, target, (middle + bottom) / 2.0, target, bottom);
                 painter.drawPath(connection);
             }
         }
-        const auto background = row.state.testFlag(QStyle::State_Selected)
-            ? row.palette.color(QPalette::Highlight) : row.palette.color(QPalette::Base);
-        painter.setPen(QPen(background, 1.4));
+        painter.setPen(QPen(background, 1.3));
         painter.setBrush(nodeColor);
         const bool merge = item.parents.size() > 1;
-        const qreal radius = merge ? 5.2 : 4.4;
+        const qreal radius = merge ? 5.0 : 4.0;
         painter.drawEllipse(QPointF(node, middle), radius, radius);
         if (merge) {
             painter.setPen(Qt::NoPen);
             painter.setBrush(background);
-            painter.drawEllipse(QPointF(node, middle), 2.1, 2.1);
+            painter.drawEllipse(QPointF(node, middle), 2.0, 2.0);
         }
     }
 
     static void paintSummary(QPainter &painter, const QStyleOptionViewItem &row,
                              const HistoryItem &item, bool dark)
     {
-        QRect content = row.rect.adjusted(7, 0, -6, 0);
-        const int chipBudget = qMin(content.width() / 2, 320);
-        const int chipRight = content.left() + chipBudget;
-        const int chipHeight = qMin(19, content.height() - 4);
-        const int top = content.top() + (content.height() - chipHeight) / 2;
+        const QRect content = row.rect.adjusted(7, 0, -8, 0);
+        const bool selected = row.state.testFlag(QStyle::State_Selected);
+        const auto text = row.palette.color(selected ? QPalette::HighlightedText : QPalette::Text);
+        const bool head = std::ranges::any_of(item.refs, [](const RefLabel &ref) {
+            return ref.kind == RefKind::Current;
+        });
+        QFont subjectFont = row.font;
+        if (head)
+            subjectFont.setWeight(QFont::DemiBold);
         QFont chipFont = row.font;
         chipFont.setPointSizeF(qMax(8.0, chipFont.pointSizeF() - 1.0));
         chipFont.setWeight(QFont::Medium);
+        const QFontMetrics chipMetrics(chipFont);
+        const int chipGap = 5;
+        const int chipPadding = 20;
+        const int maxChipWidth = 148;
+        const int chipBudget = qMin(content.width() * 2 / 5, 306);
+        const auto chipWidth = [&](const RefLabel &ref) {
+            return qMin(chipMetrics.horizontalAdvance(ref.name) + chipPadding, maxChipWidth);
+        };
+        int badgeWidth = 0;
+        if (chipBudget >= 42) {
+            for (const auto &ref : item.refs) {
+                badgeWidth += (badgeWidth ? chipGap : 0) + chipWidth(ref);
+                if (badgeWidth >= chipBudget) {
+                    badgeWidth = chipBudget;
+                    break;
+                }
+            }
+        }
+
+        const int summaryWidth = qMax(0, content.width() - (badgeWidth ? badgeWidth + 10 : 0));
+        painter.setFont(subjectFont);
+        painter.setPen(text);
+        painter.drawText(QRect(content.left(), content.top(), summaryWidth, content.height()), Qt::AlignVCenter,
+                         QFontMetrics(subjectFont).elidedText(item.text(1), Qt::ElideRight, summaryWidth));
+        if (!badgeWidth)
+            return;
+
+        const int chipHeight = qMin(19, content.height() - 4);
+        const int top = content.top() + (content.height() - chipHeight) / 2;
+        int left = content.right() - badgeWidth + 1;
         painter.setFont(chipFont);
-        QFontMetricsF metrics(chipFont);
         painter.setRenderHint(QPainter::Antialiasing);
-        const auto text = row.palette.color(row.state.testFlag(QStyle::State_Selected)
-                                             ? QPalette::HighlightedText : QPalette::Text);
         for (qsizetype index = 0; index < item.refs.size(); ++index) {
             const auto &ref = item.refs[index];
-            const int available = chipRight - content.left();
-            const int reserve = index + 1 < item.refs.size() ? 32 : 0;
-            const int desiredWidth = int(std::ceil(metrics.horizontalAdvance(ref.name))) + 14;
-            const int width = std::min({desiredWidth, 142, available - reserve});
-            if (width < 36 && available >= 26 && width < desiredWidth) {
+            const int available = content.right() - left + 1;
+            const QString remaining = QStringLiteral("+%1").arg(item.refs.size() - index - 1);
+            const int reserve = index + 1 < item.refs.size() ? chipMetrics.horizontalAdvance(remaining) + chipGap : 0;
+            const int width = qMin(chipWidth(ref), available - reserve);
+            if (width < qMin(chipWidth(ref), 44)) {
                 const QString overflow = QStringLiteral("+%1").arg(item.refs.size() - index);
                 painter.setPen(text);
-                painter.drawText(QRect(content.left(), top, available, chipHeight), Qt::AlignVCenter, overflow);
-                content.setLeft(content.left() + qMin(available, int(std::ceil(metrics.horizontalAdvance(overflow))) + 6));
+                painter.drawText(QRect(left, top, available, chipHeight), Qt::AlignVCenter, overflow);
                 break;
             }
-            if (width <= 12)
-                break;
-            const QRect chip(content.left(), top, width, chipHeight);
+            const QRect chip(left, top, width, chipHeight);
             const QColor color = refColor(ref.kind, dark);
             QColor fill = color;
-            fill.setAlpha(36);
+            const int normalAlpha = ref.kind == RefKind::Current ? 46 : 26;
+            fill.setAlpha(selected ? 20 : normalAlpha);
             painter.setPen(Qt::NoPen);
             painter.setBrush(fill);
-            painter.drawRoundedRect(chip, 4, 4);
-            painter.setPen(dark ? color : color.darker(130));
-            const QString name = desiredWidth <= width ? ref.name
-                : metrics.elidedText(ref.name, Qt::ElideRight, width - 12);
-            painter.drawText(chip.adjusted(6, 0, -6, 0), Qt::AlignVCenter, name);
-            content.setLeft(chip.right() + 7);
+            painter.drawRoundedRect(chip, 6, 6);
+            painter.setBrush(color);
+            painter.drawEllipse(QPointF(chip.left() + 8, chip.center().y() + 0.5), 2.0, 2.0);
+            painter.setPen(dark ? color : color.darker(112));
+            painter.drawText(chip.adjusted(14, 0, -6, 0), Qt::AlignVCenter,
+                             chipMetrics.elidedText(ref.name, Qt::ElideRight, width - chipPadding));
+            left = chip.right() + 1 + chipGap;
         }
-        painter.setFont(row.font);
-        painter.setPen(text);
-        const QString summary = row.fontMetrics.elidedText(item.text(1), Qt::ElideRight, content.width());
-        painter.drawText(content, Qt::AlignVCenter, summary);
     }
 
     QTreeWidget *tree_;
@@ -387,6 +422,7 @@ GitPanel::GitPanel(const QString &projectRoot, QWidget *parent, std::function<bo
     history_->setRootIsDecorated(false);
     history_->setIndentation(0);
     history_->setUniformRowHeights(true);
+    history_->setAlternatingRowColors(true);
     history_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     history_->installEventFilter(this);
     history_->viewport()->installEventFilter(this);

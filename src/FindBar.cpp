@@ -1,16 +1,39 @@
 #include "FindBar.h"
 
+#include "Appearance.h"
 #include "TextFileEditor.h"
 
 #include <QAction>
+#include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPainter>
+#include <QPropertyAnimation>
 #include <QSignalBlocker>
 #include <QToolButton>
 
 #include <limits>
+
+namespace {
+class SearchGlyph final : public QWidget
+{
+public:
+    explicit SearchGlyph(QWidget *parent) : QWidget(parent) { setFixedSize(16, 16); }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(palette().color(QPalette::PlaceholderText), 1.35,
+                            Qt::SolidLine, Qt::RoundCap));
+        painter.drawEllipse(QPointF(6.5, 6.5), 3.75, 3.75);
+        painter.drawLine(QPointF(9.4, 9.4), QPointF(13.1, 13.1));
+    }
+};
+}
 
 FindBar::FindBar(QWidget *parent)
     : QWidget(parent)
@@ -19,9 +42,11 @@ FindBar::FindBar(QWidget *parent)
     , escape_(new QAction(this))
 {
     setObjectName("fileFindBar");
+    setAttribute(Qt::WA_StyledBackground);
     auto *layout = new QHBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(6);
+    layout->setContentsMargins(9, 3, 4, 3);
+    layout->setSpacing(7);
+    layout->addWidget(new SearchGlyph(this));
 
     input_->setObjectName("fileFindInput");
     input_->setAccessibleName(tr("Find in file"));
@@ -30,11 +55,13 @@ FindBar::FindBar(QWidget *parent)
     input_->installEventFilter(this);
     layout->addWidget(input_, 1);
 
-    matchCount_->setObjectName("muted");
+    matchCount_->setObjectName("fileFindCount");
     layout->addWidget(matchCount_);
 
     auto *closeButton = new QToolButton(this);
+    closeButton->setObjectName("fileFindClose");
     closeButton->setText(QStringLiteral("×"));
+    closeButton->setFixedSize(24, 24);
     closeButton->setAccessibleName(tr("Close find"));
     closeButton->setToolTip(tr("Close find (Esc)"));
     layout->addWidget(closeButton);
@@ -63,6 +90,8 @@ void FindBar::openFor(TextFileEditor *editor)
         }
     }
 
+    if (isHidden())
+        animateOpen();
     show();
     escape_->setEnabled(true);
     setEditor(editor);
@@ -90,12 +119,34 @@ void FindBar::hideSearch()
 
     const auto editor = editor_;
     hide();
+    if (reveal_) {
+        reveal_->stop();
+        graphicsEffect()->setEnabled(false);
+    }
     escape_->setEnabled(false);
     if (editor) {
         editor->setFindText({});
         if (editor->isVisible())
             editor->setFocus(Qt::ShortcutFocusReason);
     }
+}
+
+void FindBar::animateOpen()
+{
+    if (Appearance::reduceMotion())
+        return;
+    if (!reveal_) {
+        auto *fade = new QGraphicsOpacityEffect(this);
+        setGraphicsEffect(fade);
+        reveal_ = new QPropertyAnimation(fade, "opacity", this);
+        reveal_->setDuration(140);
+        reveal_->setStartValue(0.0);
+        reveal_->setEndValue(1.0);
+        reveal_->setEasingCurve(QEasingCurve::OutCubic);
+        connect(reveal_, &QPropertyAnimation::finished, fade, [fade] { fade->setEnabled(false); });
+    }
+    graphicsEffect()->setEnabled(true);
+    reveal_->start();
 }
 
 bool FindBar::eventFilter(QObject *watched, QEvent *event)

@@ -5,10 +5,12 @@
 
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QEvent>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QProcessEnvironment>
@@ -28,6 +30,31 @@
 namespace {
 constexpr qsizetype structuredLimit = 2 * 1024 * 1024;
 constexpr qsizetype diagnosticLimit = 64 * 1024;
+
+enum class Glyph { Fetch, Add, Commit };
+
+QIcon toolbarIcon(Glyph glyph, const QColor &color)
+{
+    QPixmap pixmap(32, 32);
+    pixmap.setDevicePixelRatio(2);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(color, 1.35, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    if (glyph == Glyph::Fetch) {
+        painter.drawLine(QPointF(8, 2.5), QPointF(8, 10));
+        painter.drawPolyline(QPolygonF{QPointF(5, 7), QPointF(8, 10), QPointF(11, 7)});
+        painter.drawPolyline(QPolygonF{QPointF(3, 10.5), QPointF(3, 13), QPointF(13, 13), QPointF(13, 10.5)});
+    } else if (glyph == Glyph::Add) {
+        painter.drawLine(QPointF(3.5, 8), QPointF(12.5, 8));
+        painter.drawLine(QPointF(8, 3.5), QPointF(8, 12.5));
+    } else {
+        painter.drawEllipse(QPointF(8, 8), 5.4, 5.4);
+        painter.drawPolyline(QPolygonF{QPointF(5.5, 8), QPointF(7.3, 9.8), QPointF(10.6, 6.4)});
+    }
+    painter.end();
+    return QIcon(pixmap);
+}
 
 using GitStatus::Change;
 using GitStatus::displayPath;
@@ -153,8 +180,11 @@ GitActions::GitActions(const QString &projectRoot, QWidget *parent, std::functio
     auto *layout = new QHBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(5);
-    for (auto *button : {fetch_, add_, commit_})
+    for (auto *button : {fetch_, add_, commit_}) {
+        button->setIconSize(QSize(14, 14));
         layout->addWidget(button);
+    }
+    updateButtonIcons();
 
     fetch_->setToolTip(tr("Fetch from the default Git remote"));
     add_->setToolTip(tr("Stage selected working tree changes"));
@@ -162,6 +192,21 @@ GitActions::GitActions(const QString &projectRoot, QWidget *parent, std::functio
     connect(fetch_, &QPushButton::clicked, this, &GitActions::fetch);
     connect(add_, &QPushButton::clicked, this, &GitActions::add);
     connect(commit_, &QPushButton::clicked, this, &GitActions::commit);
+}
+
+void GitActions::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange)
+        updateButtonIcons();
+}
+
+void GitActions::updateButtonIcons()
+{
+    const auto base = palette().color(QPalette::PlaceholderText);
+    fetch_->setIcon(toolbarIcon(Glyph::Fetch, base));
+    add_->setIcon(toolbarIcon(Glyph::Add, base));
+    commit_->setIcon(toolbarIcon(Glyph::Commit, palette().color(QPalette::Link)));
 }
 
 GitActions::~GitActions()

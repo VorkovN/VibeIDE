@@ -24,6 +24,9 @@ public:
 signals:
     void repositoryChanged();
 
+protected:
+    void changeEvent(QEvent *event) override;
+
 private:
     struct Result {
         QByteArray output;
@@ -38,6 +41,7 @@ private:
     void run(QStringList arguments, Completion completion, QByteArray input = {},
              bool structuredOutput = false);
     void setBusy(bool busy);
+    void updateButtonIcons();
     void showError(const QString &action, const QString &error);
     void completeAction(const QString &action, QPushButton *button, Result result);
 

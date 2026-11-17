@@ -9,15 +9,16 @@
 namespace {
 constexpr int statusColorRole = Qt::UserRole + 42;
 
-enum class StatusColor { Added, Removed, Other };
+enum class StatusColor { Added, Removed, Conflict, Other };
 
 QColor statusColor(StatusColor status, const QColor &background)
 {
     const bool dark = background.lightness() < 128;
     switch (status) {
-    case StatusColor::Added: return QColor(dark ? "#8de5a6" : "#116425");
-    case StatusColor::Removed: return QColor(dark ? "#ff9c9c" : "#a42222");
-    case StatusColor::Other: return QColor(dark ? "#9fc7ff" : "#174f96");
+    case StatusColor::Added: return QColor(dark ? "#86e3ad" : "#167342");
+    case StatusColor::Removed: return QColor(dark ? "#ffa2ae" : "#a53549");
+    case StatusColor::Conflict: return QColor(dark ? "#e8bd80" : "#82571e");
+    case StatusColor::Other: return QColor(dark ? "#a7c7f7" : "#315d9a");
     }
     return {};
 }
@@ -30,10 +31,21 @@ public:
         tree_.installEventFilter(this);
     }
 
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
+    {
+        auto size = QStyledItemDelegate::sizeHint(option, index);
+        if (index.data(statusColorRole).isValid()) {
+            size.setWidth(size.width() + 11);
+            size.setHeight(qMax(27, size.height()));
+        }
+        return size;
+    }
+
     void paint(QPainter *painter, const QStyleOptionViewItem &option,
                const QModelIndex &index) const override
     {
-        if (!option.state.testFlag(QStyle::State_Selected) || !option.widget) {
+        const auto status = index.data(statusColorRole);
+        if (!status.isValid() || !option.widget) {
             QStyledItemDelegate::paint(painter, option, index);
             return;
         }
@@ -42,7 +54,7 @@ public:
         initStyleOption(&row, index);
         const auto *style = row.widget->style();
         const auto rect = style->subElementRect(QStyle::SE_ItemViewItemText, &row, row.widget);
-        const auto content = rect.adjusted(3, 0, -3, 0);
+        const auto content = rect.adjusted(15, 0, -6, 0);
         const auto text = row.fontMetrics.elidedText(row.text, row.textElideMode, qMax(0, content.width()));
         row.text.clear();
         style->drawControl(QStyle::CE_ItemViewItem, &row, painter, row.widget);
@@ -50,10 +62,14 @@ public:
         painter->save();
         painter->setClipRect(rect, Qt::IntersectClip);
         painter->setFont(row.font);
-        const auto status = index.data(statusColorRole);
-        const auto background = row.palette.color(QPalette::Highlight);
-        painter->setPen(status.isValid() ? statusColor(static_cast<StatusColor>(status.toInt()), background)
-                                        : row.palette.color(QPalette::HighlightedText));
+        const bool selected = row.state.testFlag(QStyle::State_Selected);
+        const auto background = row.palette.color(selected ? QPalette::Highlight : QPalette::Base);
+        const auto color = statusColor(static_cast<StatusColor>(status.toInt()), background);
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(color);
+        painter->drawRoundedRect(QRectF(rect.left() + 5, QRectF(rect).center().y() - 5, 3, 10), 1.5, 1.5);
+        painter->setPen(color);
         painter->drawText(content, row.displayAlignment, text);
         painter->restore();
     }
@@ -106,7 +122,8 @@ void GitFileList::setStatus(QTreeWidgetItem &item, const QTreeWidget &tree, cons
     else
         description = QObject::tr("Modified");
 
-    const auto color = added ? StatusColor::Added : removed ? StatusColor::Removed : StatusColor::Other;
+    const auto color = conflict ? StatusColor::Conflict
+        : added ? StatusColor::Added : removed ? StatusColor::Removed : StatusColor::Other;
     item.setData(0, statusColorRole, static_cast<int>(color));
     item.setForeground(0, statusColor(color, tree.palette().color(QPalette::Base)));
     item.setData(0, Qt::AccessibleDescriptionRole, description);

@@ -4,6 +4,7 @@
 #include <QClipboard>
 #include <QContextMenuEvent>
 #include <QFontDatabase>
+#include <QFontInfo>
 #include <QKeyEvent>
 #include <QMenu>
 #include <QPainter>
@@ -103,6 +104,8 @@ Terminal::Terminal(const QString &directory, QWidget *parent)
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     viewport()->setMouseTracking(true);
     auto terminalFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    if (!QFontInfo(terminalFont).fixedPitch())
+        terminalFont.setFamily(QStringLiteral("Menlo"));
     terminalFont.setPointSize(12);
     setFont(terminalFont);
     cellWidth_ = std::max(1, fontMetrics().horizontalAdvance(QLatin1Char('M')));

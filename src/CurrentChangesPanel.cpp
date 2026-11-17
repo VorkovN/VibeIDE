@@ -25,7 +25,9 @@ CurrentChangesPanel::CurrentChangesPanel(const QString &root, QWidget *parent)
     files_->setObjectName("currentChanges");
     files_->setAccessibleName(tr("Files with uncommitted changes"));
     files_->setHeaderLabels({tr("File")});
+    files_->setHeaderHidden(true);
     files_->setRootIsDecorated(false);
+    files_->setIndentation(0);
     files_->setUniformRowHeights(true);
     files_->setTextElideMode(Qt::ElideMiddle);
     files_->header()->setStretchLastSection(false);

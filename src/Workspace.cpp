@@ -16,6 +16,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -23,15 +24,18 @@
 #include <QFormLayout>
 #include <QHash>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QKeySequence>
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QPropertyAnimation>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -84,6 +88,71 @@ QToolButton *toolButton(const QString &text, const QString &tooltip, QWidget *pa
     button->setAccessibleName(tooltip);
     return button;
 }
+
+class TabSelectionIndicator final : public QWidget
+{
+public:
+    explicit TabSelectionIndicator(QTabBar *tabs)
+        : QWidget(tabs), tabs_(tabs), motion_(this, QByteArrayLiteral("geometry"))
+    {
+        setObjectName("tabSelectionIndicator");
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        motion_.setDuration(150);
+        motion_.setEasingCurve(QEasingCurve::OutCubic);
+        hide();
+        lower();
+        tabs_->installEventFilter(this);
+        connect(tabs_, &QTabBar::currentChanged, this, [this] { followSelection(true); });
+        connect(tabs_, &QTabBar::tabMoved, this, [this] { followSelection(false); });
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        // Painting also covers tab scrolling and rebuilds with signals blocked.
+        if (watched == tabs_ && (event->type() == QEvent::Paint || event->type() == QEvent::Resize))
+            followSelection(false);
+        return QWidget::eventFilter(watched, event);
+    }
+
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(palette().link());
+        painter.drawRoundedRect(QRectF(rect()), 1, 1);
+    }
+
+private:
+    void followSelection(bool animate)
+    {
+        const auto tab = tabs_->tabRect(tabs_->currentIndex());
+        const QRect marker(tab.x() + 9, tab.bottom() - 3, tab.width() - 18, 2);
+        const auto target = marker.isValid() ? marker.intersected(tabs_->rect()) : QRect();
+        if (target_ == target)
+            return;
+        target_ = target;
+        motion_.stop();
+        if (target_.isEmpty()) {
+            hide();
+            return;
+        }
+
+        if (animate && isVisible() && !Appearance::reduceMotion()) {
+            motion_.setStartValue(geometry());
+            motion_.setEndValue(target_);
+            motion_.start();
+        } else {
+            setGeometry(target_);
+        }
+        show();
+    }
+
+    QTabBar *tabs_;
+    QPropertyAnimation motion_;
+    QRect target_;
+};
 
 class LogHighlighter final : public QSyntaxHighlighter
 {
@@ -313,15 +382,16 @@ public:
         , changed_(std::move(changed))
     {
         auto *layout = new QVBoxLayout(this);
-        layout->setContentsMargins(12, 10, 12, 10);
+        layout->setContentsMargins(14, 12, 14, 10);
 
         split_ = new QSplitter(Qt::Vertical, this);
         split_->setChildrenCollapsible(false);
-        split_->setHandleWidth(8);
+        split_->setHandleWidth(10);
         layout->addWidget(split_, 1);
         auto *views = views_ = new QTabWidget(split_);
         views->setObjectName("projectViews");
         views->setDocumentMode(true);
+        views->tabBar()->setObjectName("contentTabs");
         views->tabBar()->setDrawBase(false);
         views->tabBar()->setSelectionBehaviorOnRemove(QTabBar::SelectPreviousTab);
         auto *currentChanges = new CurrentChangesPanel(root, views);
@@ -346,7 +416,9 @@ public:
             }
         }
         views->setCurrentWidget(git);
+        new TabSelectionIndicator(views->tabBar());
         auto *toolbar = git->toolbar();
+        toolbar->setObjectName("gitToolbar");
         views->setCornerWidget(toolbar, Qt::TopRightCorner);
         toolbar->show();
         connect(views, &QTabWidget::currentChanged, this, [this, views, files] {
@@ -409,6 +481,7 @@ public:
         terminals_->setTabsClosable(true);
         terminals_->setUsesScrollButtons(true);
         terminals_->setElideMode(Qt::ElideRight);
+        terminals_->tabBar()->setObjectName("terminalTabBar");
         terminals_->tabBar()->setDrawBase(false);
         terminals_->tabBar()->setAccessibleName(tr("Terminal tabs"));
         auto *corner = new QWidget(terminals_);
@@ -416,6 +489,7 @@ public:
         cornerLayout->setContentsMargins(6, 2, 6, 2);
         auto *add = toolButton(tr("+"), tr("New terminal at project root"), corner);
         add->setObjectName("terminalAdd");
+        add->setFixedSize(25, 25);
         cornerLayout->addWidget(add);
         terminals_->setCornerWidget(corner, Qt::TopRightCorner);
         bottomLayout->addWidget(terminals_, 1);
@@ -639,35 +713,49 @@ Workspace::Workspace()
 
     auto *sidebar = new QWidget(shell);
     sidebar->setObjectName("sidebar");
-    sidebar->setFixedWidth(172);
+    sidebar->setFixedWidth(168);
     auto *rail = new QVBoxLayout(sidebar);
-    rail->setContentsMargins(12, 15, 12, 12);
-    rail->setSpacing(6);
-    rail->addWidget(label(QApplication::applicationDisplayName(), "brand", sidebar));
-    rail->addSpacing(19);
+    rail->setContentsMargins(12, 10, 12, 12);
+    rail->setSpacing(5);
+    auto *brand = new QHBoxLayout;
+    brand->setContentsMargins(2, 0, 0, 0);
+    brand->setSpacing(9);
+    auto *brandIcon = label({}, "brandIcon", sidebar);
+    brandIcon->setFixedSize(30, 30);
+    brandIcon->setPixmap(QApplication::windowIcon().pixmap(brandIcon->size(), devicePixelRatioF()));
+    brand->addWidget(brandIcon);
+    brand->addWidget(label(QApplication::applicationDisplayName(), "brand", sidebar), 1);
+    rail->addLayout(brand);
+    rail->addSpacing(18);
     rail->addWidget(label(tr("PROJECT GROUPS"), "sectionLabel", sidebar));
 
     for (int i = 0; i < GroupCount; ++i) {
         auto *row = new QWidget(sidebar);
         row->setObjectName("groupRow");
+        row->setFixedHeight(34);
         auto *line = new QHBoxLayout(row);
-        line->setContentsMargins(1, 1, 4, 1);
-        line->setSpacing(4);
-        auto *button = toolButton(GroupNames.at(i), tr("%1 projects").arg(GroupNames.at(i)), row);
+        line->setContentsMargins(2, 0, 4, 0);
+        line->setSpacing(3);
+        const auto name = GroupNames.at(i);
+        const auto description = tr("%1 projects").arg(name);
+        auto *button = new QPushButton(name, row);
         button->setObjectName("groupButton");
+        button->setAccessibleName(description);
+        button->setToolTip(description);
         button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         button->setCheckable(true);
         groups_[i] = button;
         counts_[i] = label("0", "groupCount", row);
+        counts_[i]->setFixedHeight(20);
         counts_[i]->setAlignment(Qt::AlignCenter);
         auto *addProject = toolButton(tr("+"), tr("Open project in %1").arg(GroupNames.at(i)), row);
         addProject->setObjectName("groupAdd");
-        addProject->setFixedSize(26, 26);
+        addProject->setFixedSize(24, 24);
         line->addWidget(button, 1);
         line->addWidget(counts_[i]);
         line->addWidget(addProject);
         rail->addWidget(row);
-        connect(button, &QToolButton::clicked, this, [this, i] { selectGroup(Group(i)); });
+        connect(button, &QPushButton::clicked, this, [this, i] { selectGroup(Group(i)); });
         connect(addProject, &QToolButton::clicked, this, [this, i] { openProjectDialog(Group(i)); });
     }
     rail->addStretch();
@@ -682,7 +770,7 @@ Workspace::Workspace()
     auto *tabStrip = new QWidget(surface);
     tabStrip->setObjectName("projectStrip");
     auto *stripLayout = new QHBoxLayout(tabStrip);
-    stripLayout->setContentsMargins(8, 4, 9, 4);
+    stripLayout->setContentsMargins(14, 5, 14, 5);
     stripLayout->setSpacing(10);
     tabs_ = new QTabBar(tabStrip);
     tabs_->setObjectName("projectTabs");
@@ -694,6 +782,7 @@ Workspace::Workspace()
     tabs_->setTabsClosable(true);
     tabs_->setUsesScrollButtons(true);
     tabs_->setElideMode(Qt::ElideRight);
+    new TabSelectionIndicator(tabs_);
     stripLayout->addWidget(tabs_, 1, Qt::AlignVCenter);
     configurationStack_ = new QStackedWidget(tabStrip);
     configurationStack_->setObjectName("configurationStack");
@@ -729,7 +818,7 @@ Workspace::Workspace()
     auto *footer = new QWidget(surface);
     footer->setObjectName("footer");
     auto *footerLayout = new QHBoxLayout(footer);
-    footerLayout->setContentsMargins(13, 5, 12, 5);
+    footerLayout->setContentsMargins(14, 4, 14, 4);
     activePath_ = label({}, "muted", footer);
     activePath_->setTextFormat(Qt::PlainText);
     activePath_->setTextInteractionFlags(Qt::TextSelectableByMouse);
