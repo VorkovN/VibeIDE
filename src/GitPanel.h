@@ -21,7 +21,8 @@ class GitPanel final : public QWidget
     Q_OBJECT
 
 public:
-    explicit GitPanel(const QString &projectRoot, QWidget *parent = nullptr);
+    explicit GitPanel(const QString &projectRoot, QWidget *parent = nullptr,
+                      std::function<bool()> beforeAdd = {});
     ~GitPanel() override;
     QWidget *toolbar() const { return toolbar_; }
 

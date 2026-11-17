@@ -14,7 +14,8 @@ class GitActions final : public QWidget
     Q_OBJECT
 
 public:
-    explicit GitActions(const QString &projectRoot, QWidget *parent = nullptr);
+    explicit GitActions(const QString &projectRoot, QWidget *parent = nullptr,
+                        std::function<bool()> beforeAdd = {});
     ~GitActions() override;
 
     void checkoutCommit(const QString &hash);
@@ -41,6 +42,7 @@ private:
     void completeAction(const QString &action, QPushButton *button, Result result);
 
     const QString projectRoot_;
+    const std::function<bool()> beforeAdd_;
     QProcess *process_ = nullptr;
     QPushButton *fetch_;
     QPushButton *add_;

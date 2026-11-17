@@ -362,12 +362,12 @@ void collect(QByteArray &destination, const QByteArray &chunk, qsizetype limit)
 
 } // namespace
 
-GitPanel::GitPanel(const QString &projectRoot, QWidget *parent)
+GitPanel::GitPanel(const QString &projectRoot, QWidget *parent, std::function<bool()> beforeAdd)
     : QWidget(parent),
       projectRoot_(projectRoot),
       history_(new QTreeWidget),
       toolbar_(new QWidget(this)),
-      actions_(new GitActions(projectRoot_, toolbar_)),
+      actions_(new GitActions(projectRoot_, toolbar_, std::move(beforeAdd))),
       historyStatus_(new QLabel(tr("Git history")))
 {
     auto *layout = new QVBoxLayout(this);

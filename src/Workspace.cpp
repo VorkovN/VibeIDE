@@ -326,7 +326,13 @@ public:
         views->tabBar()->setSelectionBehaviorOnRemove(QTabBar::SelectPreviousTab);
         auto *currentChanges = new CurrentChangesPanel(root, views);
         views->addTab(currentChanges, tr("Current Changes"));
-        auto *git = new GitPanel(root, views);
+        auto *git = new GitPanel(root, views, [this] {
+            const auto error = flushAutosaves();
+            if (error.isEmpty())
+                return true;
+            QMessageBox::warning(this, tr("Add Blocked by Autosave Error"), error);
+            return false;
+        });
         views->addTab(git, tr("Commits"));
         auto *files = files_ = new FilesPanel(root, views);
         views->addTab(files, tr("Files"));
@@ -342,9 +348,9 @@ public:
         views->setCurrentWidget(git);
         auto *toolbar = git->toolbar();
         views->setCornerWidget(toolbar, Qt::TopRightCorner);
-        connect(views, &QTabWidget::currentChanged, this, [this, views, files, git, toolbar] {
+        toolbar->show();
+        connect(views, &QTabWidget::currentChanged, this, [this, views, files] {
             auto *page = views->currentWidget();
-            toolbar->setVisible(page == git);
             flushAutosaves();
             if (page == files)
                 files->reloadIfClean();

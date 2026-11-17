@@ -137,9 +137,10 @@ bool isCommitHash(const QString &hash)
 }
 }
 
-GitActions::GitActions(const QString &projectRoot, QWidget *parent)
+GitActions::GitActions(const QString &projectRoot, QWidget *parent, std::function<bool()> beforeAdd)
     : QWidget(parent)
     , projectRoot_(projectRoot)
+    , beforeAdd_(std::move(beforeAdd))
     , fetch_(new QPushButton(tr("Fetch"), this))
     , add_(new QPushButton(tr("Add"), this))
     , commit_(new QPushButton(tr("Commit"), this))
@@ -219,6 +220,8 @@ void GitActions::fetch()
 
 void GitActions::add()
 {
+    if (beforeAdd_ && !beforeAdd_())
+        return;
     run(GitStatus::arguments(), [this](Result result) {
         if (!result.error.isEmpty()) {
             showError(tr("Add"), result.error);
