@@ -38,9 +38,13 @@ namespace {
 constexpr int pageSize = 250;
 constexpr qsizetype historyLimit = 2 * 1024 * 1024;
 constexpr qsizetype errorLimit = 16 * 1024;
-constexpr int changesColumn = 4;
-constexpr int filesColumn = 5;
-constexpr int hashColumn = 6;
+constexpr int refsColumn = 1;
+constexpr int subjectColumn = 2;
+constexpr int authorColumn = 3;
+constexpr int dateColumn = 4;
+constexpr int changesColumn = 5;
+constexpr int filesColumn = 6;
+constexpr int hashColumn = 7;
 constexpr int changeCountsRole = Qt::UserRole + 2;
 constexpr int laneSpacing = 14;
 constexpr int graphMargin = 12;
@@ -52,6 +56,24 @@ struct RefLabel {
     QString name;
     RefKind kind;
 };
+
+constexpr int refChipGap = 5;
+constexpr int refChipPadding = 20;
+
+QFont refFont(QFont font)
+{
+    font.setPointSizeF(qMax(8.0, font.pointSizeF() - 1.0));
+    font.setWeight(QFont::Medium);
+    return font;
+}
+
+int refsWidth(const QList<RefLabel> &refs, const QFontMetrics &metrics)
+{
+    int width = 15;
+    for (qsizetype index = 0; index < refs.size(); ++index)
+        width += (index > 0 ? refChipGap : 0) + metrics.horizontalAdvance(refs.at(index).name) + refChipPadding;
+    return width;
+}
 
 struct GraphEdge {
     int lane;
@@ -187,6 +209,10 @@ public:
     {
         auto size = QStyledItemDelegate::sizeHint(option, index);
         size.setHeight(qMax(size.height(), 31));
+        if (index.column() == refsColumn) {
+            const auto *item = static_cast<const HistoryItem *>(tree_->itemFromIndex(index));
+            size.setWidth(refsWidth(item->refs, QFontMetrics(refFont(option.font))));
+        }
         if (index.column() == changesColumn)
             size.setWidth(qMax(size.width(), option.fontMetrics.horizontalAdvance(index.data().toString()) + 12));
         return size;
@@ -212,8 +238,10 @@ public:
         const bool dark = background.lightness() < 128;
         if (index.column() == 0)
             paintGraph(*painter, row, *item, background, dark);
-        else if (index.column() == 1)
-            paintSummary(*painter, row, *item, dark);
+        else if (index.column() == refsColumn)
+            paintRefs(*painter, row, *item, dark);
+        else if (index.column() == subjectColumn)
+            paintSummary(*painter, row, *item);
         else if (index.column() == changesColumn)
             paintChanges(*painter, row, index.data(changeCountsRole).toStringList(), dark);
         else
@@ -298,7 +326,7 @@ private:
     }
 
     static void paintSummary(QPainter &painter, const QStyleOptionViewItem &row,
-                             const HistoryItem &item, bool dark)
+                             const HistoryItem &item)
     {
         const QRect content = row.rect.adjusted(7, 0, -8, 0);
         const bool selected = row.state.testFlag(QStyle::State_Selected);
@@ -309,53 +337,26 @@ private:
         QFont subjectFont = row.font;
         if (head)
             subjectFont.setWeight(QFont::DemiBold);
-        QFont chipFont = row.font;
-        chipFont.setPointSizeF(qMax(8.0, chipFont.pointSizeF() - 1.0));
-        chipFont.setWeight(QFont::Medium);
-        const QFontMetrics chipMetrics(chipFont);
-        const int chipGap = 5;
-        const int chipPadding = 20;
-        const int maxChipWidth = 148;
-        const int chipBudget = qMin(content.width() * 2 / 5, 306);
-        const auto chipWidth = [&](const RefLabel &ref) {
-            return qMin(chipMetrics.horizontalAdvance(ref.name) + chipPadding, maxChipWidth);
-        };
-        int badgeWidth = 0;
-        if (chipBudget >= 42) {
-            for (const auto &ref : item.refs) {
-                badgeWidth += (badgeWidth ? chipGap : 0) + chipWidth(ref);
-                if (badgeWidth >= chipBudget) {
-                    badgeWidth = chipBudget;
-                    break;
-                }
-            }
-        }
-
-        const int summaryWidth = qMax(0, content.width() - (badgeWidth ? badgeWidth + 10 : 0));
         painter.setFont(subjectFont);
         painter.setPen(text);
-        painter.drawText(QRect(content.left(), content.top(), summaryWidth, content.height()), Qt::AlignVCenter,
-                         QFontMetrics(subjectFont).elidedText(item.text(1), Qt::ElideRight, summaryWidth));
-        if (!badgeWidth)
-            return;
+        painter.drawText(content, Qt::AlignVCenter,
+                         QFontMetrics(subjectFont).elidedText(item.text(subjectColumn), Qt::ElideRight, content.width()));
+    }
 
+    static void paintRefs(QPainter &painter, const QStyleOptionViewItem &row,
+                          const HistoryItem &item, bool dark)
+    {
+        const QRect content = row.rect.adjusted(7, 0, -8, 0);
+        const bool selected = row.state.testFlag(QStyle::State_Selected);
+        const auto chipFont = refFont(row.font);
+        const QFontMetrics chipMetrics(chipFont);
         const int chipHeight = qMin(19, content.height() - 4);
         const int top = content.top() + (content.height() - chipHeight) / 2;
-        int left = content.right() - badgeWidth + 1;
+        int left = content.left();
         painter.setFont(chipFont);
         painter.setRenderHint(QPainter::Antialiasing);
-        for (qsizetype index = 0; index < item.refs.size(); ++index) {
-            const auto &ref = item.refs[index];
-            const int available = content.right() - left + 1;
-            const QString remaining = QStringLiteral("+%1").arg(item.refs.size() - index - 1);
-            const int reserve = index + 1 < item.refs.size() ? chipMetrics.horizontalAdvance(remaining) + chipGap : 0;
-            const int width = qMin(chipWidth(ref), available - reserve);
-            if (width < qMin(chipWidth(ref), 44)) {
-                const QString overflow = QStringLiteral("+%1").arg(item.refs.size() - index);
-                painter.setPen(text);
-                painter.drawText(QRect(left, top, available, chipHeight), Qt::AlignVCenter, overflow);
-                break;
-            }
+        for (const auto &ref : item.refs) {
+            const int width = chipMetrics.horizontalAdvance(ref.name) + refChipPadding;
             const QRect chip(left, top, width, chipHeight);
             const QColor color = refColor(ref.kind, dark);
             QColor fill = color;
@@ -368,8 +369,8 @@ private:
             painter.drawEllipse(QPointF(chip.left() + 8, chip.center().y() + 0.5), 2.0, 2.0);
             painter.setPen(dark ? color : color.darker(112));
             painter.drawText(chip.adjusted(14, 0, -6, 0), Qt::AlignVCenter,
-                             chipMetrics.elidedText(ref.name, Qt::ElideRight, width - chipPadding));
-            left = chip.right() + 1 + chipGap;
+                             ref.name);
+            left = chip.right() + 1 + refChipGap;
         }
     }
 
@@ -427,19 +428,22 @@ GitPanel::GitPanel(const QString &projectRoot, QWidget *parent, std::function<bo
     history_->installEventFilter(this);
     history_->viewport()->installEventFilter(this);
     history_->setItemDelegate(new HistoryDelegate(history_));
-    history_->setHeaderLabels({tr("Graph"), tr("Commit"), tr("Author"), tr("Date"),
+    history_->setHeaderLabels({tr("Graph"), tr("Refs"), tr("Commit"), tr("Author"), tr("Date"),
                                tr("Changes"), tr("Files"), tr("Hash")});
     auto *header = history_->header();
     header->setStretchLastSection(false);
     header->setSectionResizeMode(QHeaderView::Interactive);
-    header->setSectionResizeMode(1, QHeaderView::Stretch);
+    header->setSectionResizeMode(refsColumn, QHeaderView::ResizeToContents);
+    header->setResizeContentsPrecision(-1);
+    header->setSectionResizeMode(subjectColumn, QHeaderView::Stretch);
     header->setSectionResizeMode(changesColumn, QHeaderView::ResizeToContents);
     header->setSectionResizeMode(filesColumn, QHeaderView::ResizeToContents);
     history_->headerItem()->setToolTip(changesColumn, tr("Lines added and removed"));
+    history_->headerItem()->setTextAlignment(filesColumn, Qt::AlignCenter);
     history_->headerItem()->setToolTip(filesColumn, tr("Number of changed files"));
     history_->setColumnWidth(0, 58);
-    history_->setColumnWidth(2, 120);
-    history_->setColumnWidth(3, 104);
+    history_->setColumnWidth(authorColumn, 120);
+    history_->setColumnWidth(dateColumn, 104);
     history_->setColumnWidth(hashColumn, 76);
 
     layout->addWidget(history_, 1);
@@ -487,7 +491,7 @@ bool GitPanel::eventFilter(QObject *watched, QEvent *event)
         if (context->reason() == QContextMenuEvent::Keyboard) {
             const auto index = history_->currentIndex();
             if (index.isValid()) {
-                const QRect row = history_->visualRect(index.siblingAtColumn(1));
+                const QRect row = history_->visualRect(index.siblingAtColumn(subjectColumn));
                 showCommitMenu(index, history_->viewport()->mapToGlobal(row.center()));
             }
         }
@@ -533,7 +537,7 @@ void GitPanel::showCommitMenu(const QModelIndex &index, const QPoint &globalPosi
     if (hash.isEmpty())
         return;
 
-    const QString subject = index.siblingAtColumn(1).data(Qt::DisplayRole).toString();
+    const QString subject = index.siblingAtColumn(subjectColumn).data(Qt::DisplayRole).toString();
     QMenu menu(this);
     auto *cherryPick = menu.addAction(tr("Cherry-pick"));
     auto *checkout = menu.addAction(tr("Checkout"));
@@ -556,7 +560,7 @@ void GitPanel::squashSelectedCommits()
     for (int index = 0; index < history_->topLevelItemCount(); ++index) {
         const auto *item = history_->topLevelItem(index);
         if (item->isSelected())
-            commits.append({item->data(0, Qt::UserRole).toString(), item->text(1)});
+            commits.append({item->data(0, Qt::UserRole).toString(), item->text(subjectColumn)});
     }
     GitSquash::request(this, gitRoot_, commits, [this] { checkHistory(); });
 }
@@ -758,17 +762,19 @@ void GitPanel::appendHistory(const QByteArray &output, int limit, bool replace, 
             const QString hash = QString::fromLatin1(fields[1]);
             const QString subject = QString::fromUtf8(fields[6]);
             item->setData(0, Qt::UserRole, hash);
-            item->setText(1, subject);
+            item->setText(subjectColumn, subject);
             QStringList refs;
             for (const auto &ref : item->refs)
                 refs << ref.name;
-            item->setToolTip(1, refs.isEmpty() ? subject : subject + QStringLiteral("\n\n") + refs.join(QStringLiteral(", ")));
-            item->setText(2, QString::fromUtf8(fields[3]));
-            item->setToolTip(2, item->text(2));
-            item->setText(3, QString::fromLatin1(fields[4]));
+            item->setText(refsColumn, refs.join(QStringLiteral(", ")));
+            item->setToolTip(refsColumn, refs.join(u'\n'));
+            item->setToolTip(subjectColumn, subject);
+            item->setText(authorColumn, QString::fromUtf8(fields[3]));
+            item->setToolTip(authorColumn, item->text(authorColumn));
+            item->setText(dateColumn, QString::fromLatin1(fields[4]));
             item->setText(changesColumn, QStringLiteral("—"));
             item->setText(filesColumn, QStringLiteral("—"));
-            item->setTextAlignment(filesColumn, Qt::AlignRight | Qt::AlignVCenter);
+            item->setTextAlignment(filesColumn, Qt::AlignCenter);
             item->setText(hashColumn, QString::fromLatin1(fields[2]));
             item->setFont(hashColumn, fixedFont);
             item->setToolTip(hashColumn, hash);
