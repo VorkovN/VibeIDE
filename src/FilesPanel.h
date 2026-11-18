@@ -12,11 +12,16 @@ class TextFileEditor;
 
 class FilesPanel final : public QWidget
 {
+    Q_OBJECT
+
 public:
     explicit FilesPanel(const QString &root, QWidget *parent = nullptr);
     bool flushAutosave();
     const QString &autosaveError() const;
     void reloadIfClean();
+
+signals:
+    void databaseRequested(const QString &path);
 
 protected:
     void showEvent(QShowEvent *event) override;

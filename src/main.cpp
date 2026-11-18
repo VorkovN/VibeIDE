@@ -215,6 +215,15 @@ QString themeStyleSheet(bool light)
         QPushButton#groupButton:hover, QToolButton#groupAdd:hover { background: palette(midlight); }
         QPushButton#groupButton:focus, QToolButton#groupAdd:focus { border-color: palette(link); }
         QPushButton#groupButton:checked { color: palette(highlighted-text); }
+        QPushButton#sqliteButton {
+            background: transparent; border: 1px solid transparent;
+            text-align: left; padding: 4px 8px; font-weight: 600;
+        }
+        QPushButton#sqliteButton:hover { background: palette(midlight); }
+        QPushButton#sqliteButton:checked {
+            background: palette(highlight); color: palette(highlighted-text); border-color: palette(mid);
+        }
+        QPushButton#sqliteButton:focus { border-color: palette(link); }
         QToolButton#groupAdd { background: transparent; border-color: transparent; padding: 0; }
 
         QTabBar::tab {
@@ -227,7 +236,7 @@ QString themeStyleSheet(bool light)
         QTabBar#terminalTabBar::tab { padding: 4px 8px; }
         QTabBar QToolButton { padding: 0; }
 
-        QTreeView, QListView, QPlainTextEdit {
+        QTreeView, QTableView, QListView, QPlainTextEdit {
             background: palette(base); border: 1px solid palette(mid); border-radius: 6px;
             selection-background-color: palette(highlight); selection-color: palette(highlighted-text);
             outline: 0;
@@ -235,8 +244,13 @@ QString themeStyleSheet(bool light)
         QTreeView#directoryTree::item, QTreeView#diffFiles::item, QTreeView#currentChanges::item {
             padding: 3px 6px;
         }
-        QTreeView::item:hover:!selected, QListView::item:hover:!selected { background: palette(midlight); }
-        QTreeView::item:selected, QListView::item:selected { background: palette(highlight); }
+        QTableView::item { padding: 4px 8px; }
+        QTreeView::item:hover:!selected, QTableView::item:hover:!selected, QListView::item:hover:!selected {
+            background: palette(midlight);
+        }
+        QTreeView::item:selected, QTableView::item:selected, QListView::item:selected {
+            background: palette(highlight);
+        }
         QHeaderView::section {
             background: palette(alternate-base); color: palette(placeholder-text);
             border: 0; border-bottom: 1px solid palette(mid); padding: 6px 8px; font-weight: 600;
@@ -341,7 +355,7 @@ int main(int argc, char *argv[])
     app.setApplicationName(QStringLiteral("VibeIDE"));
     app.setApplicationDisplayName(QStringLiteral("VibeIDE"));
     app.setOrganizationName(QStringLiteral("VibeIDE"));
-    app.setApplicationVersion(QStringLiteral("0.1.6"));
+    app.setApplicationVersion(QStringLiteral("0.1.7"));
     const QDir executableDirectory(app.applicationDirPath());
     app.setWindowIcon(QIcon(executableDirectory.absoluteFilePath(QStringLiteral("../Resources/VibeIDE.png"))));
     initializeExecutablePath();

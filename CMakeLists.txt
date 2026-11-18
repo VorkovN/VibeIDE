@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(VibeIDE VERSION 0.1.6 LANGUAGES CXX)
+project(VibeIDE VERSION 0.1.7 LANGUAGES CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     message(FATAL_ERROR "VibeIDE requires macOS.")
@@ -14,6 +14,13 @@ set(CMAKE_AUTOMOC ON)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Widgets)
 find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
+set(VIBEIDE_SQLITE_SDK "${CMAKE_OSX_SYSROOT}")
+if(NOT IS_DIRECTORY "${VIBEIDE_SQLITE_SDK}")
+    execute_process(COMMAND xcrun --sdk macosx --show-sdk-path
+        OUTPUT_VARIABLE VIBEIDE_SQLITE_SDK OUTPUT_STRIP_TRAILING_WHITESPACE
+        COMMAND_ERROR_IS_FATAL ANY)
+endif()
+find_library(SQLITE3_LIBRARY sqlite3 PATHS "${VIBEIDE_SQLITE_SDK}/usr/lib" NO_DEFAULT_PATH REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(VTerm REQUIRED IMPORTED_TARGET vterm>=0.3)
 
@@ -27,6 +34,7 @@ qt_add_executable(VibeIDE MACOSX_BUNDLE
     src/CommitDiffView.cpp
     src/CommitDiffSource.cpp
     src/CurrentChangesPanel.cpp
+    src/DatabasePanel.cpp
     src/FileTransfer.cpp
     src/FilesPanel.cpp
     src/FindBar.cpp
@@ -36,12 +44,13 @@ qt_add_executable(VibeIDE MACOSX_BUNDLE
     src/GitSquash.cpp
     src/Pty.cpp
     src/RunConfigurations.cpp
+    src/SqliteReader.cpp
     src/SyntaxHighlighting.cpp
     src/Terminal.cpp
     src/TextFileEditor.cpp
     src/Workspace.cpp
 )
-target_link_libraries(VibeIDE PRIVATE Qt6::Widgets PkgConfig::VTerm ${APPKIT_FRAMEWORK})
+target_link_libraries(VibeIDE PRIVATE Qt6::Widgets PkgConfig::VTerm ${APPKIT_FRAMEWORK} ${SQLITE3_LIBRARY})
 set_target_properties(VibeIDE PROPERTIES
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/assets/Info.plist.in"
     MACOSX_BUNDLE_GUI_IDENTIFIER "org.vibeide.desktop"

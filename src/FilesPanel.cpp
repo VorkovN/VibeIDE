@@ -44,6 +44,16 @@ const auto showDotfilesKey = QStringLiteral("files/showDotfiles");
 const QKeySequence moveToTrashKey(Qt::CTRL | Qt::Key_Backspace);
 const QKeySequence showDotfilesKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Period);
 
+bool isSqliteDatabase(const QString &path)
+{
+    QFile file(path);
+    if (file.open(QIODevice::ReadOnly) && file.read(16) == QByteArray("SQLite format 3\0", 16))
+        return true;
+    const auto suffix = QFileInfo(path).suffix().toLower();
+    return suffix == QStringLiteral("sqlite") || suffix == QStringLiteral("sqlite3") ||
+           suffix == QStringLiteral("db") || suffix == QStringLiteral("db3");
+}
+
 QIcon projectEntryIcon(const QColor &ink, bool folder)
 {
     QIcon icon;
@@ -594,6 +604,12 @@ void FilesPanel::openSelection(const QModelIndex &index)
     openedIndex_ = requested;
     openedPath_ = info.filePath();
     relativePath_ = QDir(root_).relativeFilePath(openedPath_);
+    if (info.isFile() && isSqliteDatabase(openedPath_)) {
+        editor_->clearFile(tr("Opened in SQLite."));
+        updatePath();
+        emit databaseRequested(openedPath_);
+        return;
+    }
     if (info.isFile())
         editor_->openFile(openedPath_, previewLimit);
     else

@@ -3,6 +3,7 @@
 #include "Appearance.h"
 #include "CommitDiffView.h"
 #include "CurrentChangesPanel.h"
+#include "DatabasePanel.h"
 #include "FilesPanel.h"
 #include "GitPanel.h"
 #include "RunConfigurations.h"
@@ -376,7 +377,8 @@ class ProjectView final : public QWidget
 {
 public:
     ProjectView(const QString &root, bool canRun, bool isWeb, const QJsonObject &state,
-                std::function<void()> changed, QWidget *parent)
+                std::function<void()> changed, QWidget *parent,
+                std::function<void(const QString &)> openDatabase = {})
         : QWidget(parent)
         , root_(root)
         , changed_(std::move(changed))
@@ -406,6 +408,8 @@ public:
         views->addTab(git, tr("Commits"));
         auto *files = files_ = new FilesPanel(root, views);
         views->addTab(files, tr("Files"));
+        if (openDatabase)
+            connect(files, &FilesPanel::databaseRequested, this, std::move(openDatabase));
         views->setTabsClosable(true);
         for (int tab = 0; tab < views->count(); ++tab) {
             for (const auto side : {QTabBar::LeftSide, QTabBar::RightSide}) {
@@ -758,6 +762,15 @@ Workspace::Workspace()
         connect(button, &QPushButton::clicked, this, [this, i] { selectGroup(Group(i)); });
         connect(addProject, &QToolButton::clicked, this, [this, i] { openProjectDialog(Group(i)); });
     }
+    rail->addSpacing(18);
+    rail->addWidget(label(tr("DATABASES"), "sectionLabel", sidebar));
+    sqliteButton_ = new QPushButton(tr("SQLite"), sidebar);
+    sqliteButton_->setObjectName("sqliteButton");
+    sqliteButton_->setAccessibleName(tr("SQLite databases"));
+    sqliteButton_->setCheckable(true);
+    sqliteButton_->setFixedHeight(34);
+    rail->addWidget(sqliteButton_);
+    connect(sqliteButton_, &QPushButton::clicked, this, [this] { showDatabase(); });
     rail->addStretch();
     shellLayout->addWidget(sidebar);
 
@@ -768,6 +781,7 @@ Workspace::Workspace()
     surfaceLayout->setSpacing(0);
     shellLayout->addWidget(surface, 1);
     auto *tabStrip = new QWidget(surface);
+    projectStrip_ = tabStrip;
     tabStrip->setObjectName("projectStrip");
     auto *stripLayout = new QHBoxLayout(tabStrip);
     stripLayout->setContentsMargins(14, 5, 14, 5);
@@ -814,6 +828,9 @@ Workspace::Workspace()
     connect(emptyOpen, &QPushButton::clicked, this, [this] { openProjectDialog(group_); });
     emptyLayout->addWidget(emptyOpen, 0, Qt::AlignHCenter);
     stack_->addWidget(empty_);
+    database_ = new DatabasePanel(QDir::homePath(), stack_);
+    database_->restoreState(databaseState_);
+    stack_->addWidget(database_);
 
     auto *footer = new QWidget(surface);
     footer->setObjectName("footer");
@@ -827,6 +844,14 @@ Workspace::Workspace()
     sessionStatus_ = label(tr("Local workspace"), "sessionStatus", footer);
     footerLayout->addWidget(sessionStatus_);
     surfaceLayout->addWidget(footer);
+    connect(database_, &DatabasePanel::stateChanged, this, [this] {
+        if (databaseActive_) {
+            const auto path = database_->saveState().value("path").toString();
+            activePath_->setText(QDir::toNativeSeparators(path));
+            activePath_->setToolTip(path);
+        }
+        updateSessionStatus(saveSession());
+    });
 
     auto *openAction = new QAction(tr("Open Project"), this);
     openAction->setShortcut(QKeySequence::Open);
@@ -911,7 +936,17 @@ void Workspace::openProjectDialog(Group group)
 
 void Workspace::selectGroup(Group group)
 {
+    databaseActive_ = false;
     group_ = group;
+    rebuildTabs();
+    updateSessionStatus(saveSession());
+}
+
+void Workspace::showDatabase(const QString &path)
+{
+    databaseActive_ = true;
+    if (!path.isEmpty())
+        database_->openDatabase(path);
     rebuildTabs();
     updateSessionStatus(saveSession());
 }
@@ -936,7 +971,7 @@ void Workspace::rebuildTabs()
                 current = tab;
         }
         for (int i = 0; i < GroupCount; ++i) {
-            const bool active = group_ == i;
+            const bool active = !databaseActive_ && group_ == i;
             groups_[i]->setChecked(active);
             auto *row = groups_[i]->parentWidget();
             if (row->property("active") != active) {
@@ -947,6 +982,7 @@ void Workspace::rebuildTabs()
             }
             counts_[i]->setText(QString::number(counts[i]));
         }
+        sqliteButton_->setChecked(databaseActive_);
         tabs_->setCurrentIndex(current);
     }
     activateTab(tabs_->currentIndex());
@@ -954,6 +990,15 @@ void Workspace::rebuildTabs()
 
 void Workspace::activateTab(int tab)
 {
+    projectStrip_->setVisible(!databaseActive_);
+    if (databaseActive_) {
+        configurationStack_->hide();
+        stack_->setCurrentWidget(database_);
+        const auto path = database_->saveState().value("path").toString();
+        activePath_->setText(QDir::toNativeSeparators(path));
+        activePath_->setToolTip(path);
+        return;
+    }
     if (tab < 0 || tab >= tabs_->count()) {
         configurationStack_->hide();
         emptyTitle_->setText(tr("No %1 projects open").arg(GroupNames.at(group_)));
@@ -965,7 +1010,8 @@ void Workspace::activateTab(int tab)
     auto &project = projects_[tabs_->tabData(tab).toInt()];
     if (!project.view) {
         project.view = new ProjectView(project.root, project.group != Cpp, project.group == Web, project.state,
-                                      [this] { updateSessionStatus(saveSession()); }, stack_);
+                                      [this] { updateSessionStatus(saveSession()); }, stack_,
+                                      [this](const QString &path) { showDatabase(path); });
         stack_->addWidget(project.view);
         if (auto *runs = project.view->runConfigurations())
             configurationStack_->addWidget(runs);
@@ -1037,6 +1083,8 @@ void Workspace::readSession()
     if (!file.open(QIODevice::ReadOnly))
         return;
     const auto data = QJsonDocument::fromJson(file.readAll()).object();
+    databaseState_ = data.value("database").toObject();
+    databaseActive_ = data.value("activeSection").toString() == QStringLiteral("sqlite");
     closedRunConfigurations_ = data.value("closedRunConfigurations").toObject();
     group_ = Group(std::clamp(data.value("group").toInt(), 0, int(GroupCount) - 1));
     const auto selected = data.value("selected").toArray();
@@ -1047,7 +1095,14 @@ void Workspace::readSession()
         const auto root = project.value("root").toString();
         const int group = project.value("group").toInt(-1);
         if (QDir::isAbsolutePath(root) && group >= 0 && group < GroupCount) {
-            projects_.append({root, Group(group), project.value("state").toObject(), nullptr});
+            auto state = project.value("state").toObject();
+            const auto legacyDatabase = state.take("database").toObject();
+            if (databaseState_.isEmpty() && !legacyDatabase.value("path").toString().isEmpty()) {
+                databaseState_ = legacyDatabase;
+                if (QDir::isRelativePath(legacyDatabase.value("path").toString()))
+                    databaseState_.insert("path", QDir(root).absoluteFilePath(legacyDatabase.value("path").toString()));
+            }
+            projects_.append({root, Group(group), state, nullptr});
         }
     }
     restoreGeometry(QByteArray::fromBase64(data.value("geometry").toString().toLatin1()));
@@ -1071,6 +1126,8 @@ bool Workspace::saveSession()
         selected.append(root);
     const auto document = QJsonDocument(QJsonObject{
         {"group", int(group_)},
+        {"activeSection", databaseActive_ ? QStringLiteral("sqlite") : QStringLiteral("projects")},
+        {"database", database_->saveState()},
         {"selected", selected},
         {"projects", projects},
         {"closedRunConfigurations", closedRunConfigurations_},
