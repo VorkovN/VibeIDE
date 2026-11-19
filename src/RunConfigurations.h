@@ -29,7 +29,8 @@ signals:
     void stateChanged();
     void runRequested(const QString &program, const QStringList &arguments,
                       const QString &workingDirectory, const QString &title,
-                      const QProcessEnvironment &environment, const QString &configurationId);
+                      const QProcessEnvironment &environment, const QString &configurationId,
+                      bool detached);
     void stopRequested(const QString &configurationId);
 
 private:
@@ -44,6 +45,8 @@ private:
         QString workingDirectory;
         QString arguments;
         bool useUv = false;
+        bool detached = false;
+        QString applicationName;
         QStringList environment;
     };
 

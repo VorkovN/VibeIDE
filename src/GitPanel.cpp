@@ -687,7 +687,7 @@ void GitPanel::loadHistory(int offset, int limit)
     historyStatus_->setToolTip({});
 
     QStringList arguments = {QStringLiteral("log"), QStringLiteral("--stdin"),
-                             QStringLiteral("--author-date-order"), QStringLiteral("--color=never"),
+                             QStringLiteral("--topo-order"), QStringLiteral("--color=never"),
                              QStringLiteral("--no-show-signature"), QStringLiteral("--no-notes"),
                              QStringLiteral("--decorate=full"),
                              QStringLiteral("--format=%x00%H%x00%h%x00%aN%x00%as%x00%D%x00%s%x00%P%x00"),

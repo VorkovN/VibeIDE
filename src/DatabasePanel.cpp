@@ -6,12 +6,15 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QComboBox>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QItemSelectionModel>
+#include <QInputDialog>
+#include <QJsonArray>
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollBar>
@@ -89,7 +92,8 @@ private:
 
 DatabasePanel::DatabasePanel(const QString &initialDirectory, QWidget *parent)
     : QWidget(parent), initialDirectory_(initialDirectory), reader_(nullptr),
-      autoRefresh_(new QCheckBox(tr("Auto-refresh"), this)), pathLabel_(new QLabel(this)),
+      autoRefresh_(new QCheckBox(tr("Auto-refresh"), this)), connectionPicker_(new QComboBox(this)),
+      pathLabel_(new QLabel(this)),
       status_(new QLabel(this)), tables_(new QTreeWidget(this)), rows_(new QTableView(this)),
       model_(new DatabaseTableModel(this)), previous_(new QPushButton(tr("Previous"), this)),
       next_(new QPushButton(tr("Next"), this)), range_(new QLabel(this))
@@ -99,9 +103,17 @@ DatabasePanel::DatabasePanel(const QString &initialDirectory, QWidget *parent)
     layout->setContentsMargins(10, 9, 10, 10);
     layout->setSpacing(7);
     auto *toolbar = new QHBoxLayout;
-    auto *open = new QPushButton(tr("Open Database…"), this);
+    auto *open = new QPushButton(tr("Add Database…"), this);
     open->setObjectName("databaseOpen");
     toolbar->addWidget(open);
+    connectionPicker_->setObjectName("databaseConnections");
+    connectionPicker_->setAccessibleName(tr("Saved SQLite databases"));
+    connectionPicker_->setPlaceholderText(tr("Saved databases"));
+    connectionPicker_->setMinimumContentsLength(16);
+    connectionPicker_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    connectionPicker_->setMaximumWidth(300);
+    connectionPicker_->setEnabled(false);
+    toolbar->addWidget(connectionPicker_);
     pathLabel_->setObjectName("databasePath");
     pathLabel_->setTextFormat(Qt::PlainText);
     pathLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -188,9 +200,21 @@ DatabasePanel::DatabasePanel(const QString &initialDirectory, QWidget *parent)
         const auto path = QFileDialog::getOpenFileName(this, tr("Open SQLite Database"),
             path_.isEmpty() ? initialDirectory_ : QFileInfo(path_).absolutePath(),
             tr("SQLite databases (*.db *.sqlite *.sqlite3 *.db3);;All files (*)"));
-        if (!path.isEmpty())
-            openDatabase(path);
+        if (path.isEmpty())
+            return;
+        const auto normalized = connectionPath(path);
+        const auto existing = std::ranges::find(connections_, normalized, &Connection::path);
+        const auto suggestedName = existing == connections_.end()
+            ? QFileInfo(path).completeBaseName() : existing->name;
+        QInputDialog name(this);
+        name.setObjectName("databaseConnectionNameDialog");
+        name.setWindowTitle(tr("Save SQLite Connection"));
+        name.setLabelText(tr("Connection name"));
+        name.setTextValue(suggestedName);
+        if (name.exec() == QDialog::Accepted)
+            openDatabase(path, name.textValue());
     });
+    connect(connectionPicker_, &QComboBox::currentIndexChanged, this, &DatabasePanel::activateConnection);
     connect(tables_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *item) {
         if (!item)
             return;
@@ -232,17 +256,67 @@ DatabasePanel::~DatabasePanel()
     workerThread_.wait();
 }
 
-void DatabasePanel::openDatabase(const QString &path)
+QString DatabasePanel::connectionPath(const QString &path) const
 {
-    const auto absolute = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
-    if (absolute != path_) {
-        path_ = absolute;
-        table_.clear();
+    const auto absolute = QDir::isRelativePath(path) ? QDir(initialDirectory_).absoluteFilePath(path) : path;
+    const auto canonical = QFileInfo(absolute).canonicalFilePath();
+    return canonical.isEmpty() ? QDir::cleanPath(absolute) : canonical;
+}
+
+void DatabasePanel::openDatabase(const QString &path, const QString &name)
+{
+    if (path.isEmpty())
+        return;
+    const auto normalized = connectionPath(path);
+    auto existing = std::ranges::find(connections_, normalized, &Connection::path);
+    if (existing == connections_.end()) {
+        const auto displayName = name.trimmed().isEmpty() ? QFileInfo(normalized).completeBaseName() : name.trimmed();
+        connections_.append({displayName.isEmpty() ? QFileInfo(normalized).fileName() : displayName, normalized, {}});
+        existing = connections_.end() - 1;
+    } else if (!name.trimmed().isEmpty()) {
+        existing->name = name.trimmed();
+    }
+    const int index = int(existing - connections_.begin());
+    updateConnections();
+    activateConnection(index);
+}
+
+void DatabasePanel::rememberCurrentTable()
+{
+    const auto current = std::ranges::find(connections_, path_, &Connection::path);
+    if (current != connections_.end())
+        current->table = table_;
+}
+
+void DatabasePanel::updateConnections()
+{
+    const QSignalBlocker blocked(connectionPicker_);
+    connectionPicker_->clear();
+    int active = -1;
+    for (int index = 0; index < connections_.size(); ++index) {
+        const auto &connection = connections_.at(index);
+        connectionPicker_->addItem(connection.name, connection.path);
+        connectionPicker_->setItemData(index, connection.path, Qt::ToolTipRole);
+        if (connection.path == path_)
+            active = index;
+    }
+    connectionPicker_->setCurrentIndex(active);
+    connectionPicker_->setEnabled(!connections_.isEmpty());
+}
+
+void DatabasePanel::activateConnection(int index)
+{
+    if (index < 0 || index >= connections_.size())
+        return;
+    rememberCurrentTable();
+    const auto connection = connections_.at(index);
+    if (connection.path != path_) {
+        path_ = connection.path;
+        table_ = connection.table;
         offset_ = 0;
         previousOffsets_.clear();
         hasMore_ = false;
         nextOffset_ = 0;
-        ++generation_;
         {
             const QSignalBlocker blocked(tables_);
             tables_->clear();
@@ -251,9 +325,14 @@ void DatabasePanel::openDatabase(const QString &path)
         range_->clear();
         previous_->setEnabled(false);
         next_->setEnabled(false);
-        updatePath();
-        emit stateChanged();
     }
+    ++generation_;
+    {
+        const QSignalBlocker blocked(connectionPicker_);
+        connectionPicker_->setCurrentIndex(index);
+    }
+    updatePath();
+    emit stateChanged();
     status_->setText(tr("Loading database…"));
     status_->show();
     refresh(true);
@@ -261,14 +340,55 @@ void DatabasePanel::openDatabase(const QString &path)
 
 void DatabasePanel::restoreState(const QJsonObject &state)
 {
-    path_ = state.value(QStringLiteral("path")).toString();
-    if (!path_.isEmpty() && QDir::isRelativePath(path_))
-        path_ = QDir(initialDirectory_).absoluteFilePath(path_);
-    table_ = state.value(QStringLiteral("table")).toString();
+    ++generation_;
+    connections_.clear();
+    path_.clear();
+    table_.clear();
+    for (const auto &item : state.value(QStringLiteral("connections")).toArray()) {
+        const auto saved = item.toObject();
+        const auto savedPath = saved.value(QStringLiteral("path")).toString();
+        if (savedPath.isEmpty())
+            continue;
+        const auto path = connectionPath(savedPath);
+        if (std::ranges::find(connections_, path, &Connection::path) != connections_.end())
+            continue;
+        auto name = saved.value(QStringLiteral("name")).toString().trimmed();
+        if (name.isEmpty())
+            name = QFileInfo(path).completeBaseName();
+        connections_.append({name.isEmpty() ? QFileInfo(path).fileName() : name, path,
+                             saved.value(QStringLiteral("table")).toString()});
+    }
+    const auto savedPath = state.value(QStringLiteral("path")).toString();
+    if (!savedPath.isEmpty()) {
+        path_ = connectionPath(savedPath);
+        const auto active = std::ranges::find(connections_, path_, &Connection::path);
+        if (active == connections_.end()) {
+            const QFileInfo info(path_);
+            connections_.append({info.completeBaseName().isEmpty() ? info.fileName() : info.completeBaseName(),
+                                 path_, state.value(QStringLiteral("table")).toString()});
+            table_ = connections_.constLast().table;
+        } else {
+            table_ = active->table;
+        }
+    } else if (!connections_.isEmpty()) {
+        path_ = connections_.constFirst().path;
+        table_ = connections_.constFirst().table;
+    }
     offset_ = 0;
     previousOffsets_.clear();
+    hasMore_ = false;
+    nextOffset_ = 0;
+    previous_->setEnabled(false);
+    next_->setEnabled(false);
+    {
+        const QSignalBlocker blocked(tables_);
+        tables_->clear();
+    }
+    model_->setSnapshot({});
+    range_->clear();
     const QSignalBlocker blocked(autoRefresh_);
     autoRefresh_->setChecked(state.value(QStringLiteral("autoRefresh")).toBool(true));
+    updateConnections();
     updatePath();
     if (!path_.isEmpty()) {
         status_->setText(tr("Loading database…"));
@@ -278,8 +398,15 @@ void DatabasePanel::restoreState(const QJsonObject &state)
 
 QJsonObject DatabasePanel::saveState() const
 {
+    QJsonArray connections;
+    for (const auto &connection : connections_) {
+        connections.append(QJsonObject{{QStringLiteral("name"), connection.name},
+            {QStringLiteral("path"), connection.path},
+            {QStringLiteral("table"), connection.path == path_ ? table_ : connection.table}});
+    }
     return {{QStringLiteral("path"), path_}, {QStringLiteral("table"), table_},
-            {QStringLiteral("autoRefresh"), autoRefresh_->isChecked()}};
+            {QStringLiteral("autoRefresh"), autoRefresh_->isChecked()},
+            {QStringLiteral("connections"), connections}};
 }
 
 void DatabasePanel::showEvent(QShowEvent *event)
@@ -363,6 +490,7 @@ void DatabasePanel::showSnapshot(const SqliteSnapshot &snapshot)
     if (tableChanged || offset_ != snapshot.offset)
         previousOffsets_.clear();
     table_ = snapshot.table;
+    rememberCurrentTable();
     offset_ = snapshot.offset;
     hasMore_ = snapshot.hasMore;
     nextOffset_ = offset_ + snapshot.rows.size();

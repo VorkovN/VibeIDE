@@ -50,6 +50,7 @@
 #include <QSyntaxHighlighter>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QTemporaryFile>
 #include <QTimer>
 #include <QToolButton>
 
@@ -58,6 +59,7 @@
 #include <utility>
 
 #include <signal.h>
+#include <libproc.h>
 #include <unistd.h>
 
 namespace {
@@ -74,7 +76,7 @@ QString projectName(const QString &root)
     return name.isEmpty() ? root : name;
 }
 
-QLabel *label(const QString &text, const QString &role, QWidget *parent)
+QLabel *makeLabel(const QString &text, const QString &role, QWidget *parent)
 {
     auto *result = new QLabel(text, parent);
     result->setObjectName(role);
@@ -218,7 +220,7 @@ public:
         bar->setObjectName("runBar");
         auto *barLayout = new QHBoxLayout(bar);
         barLayout->setContentsMargins(12, 4, 8, 4);
-        status_ = label(tr("Running"), "muted", bar);
+        status_ = makeLabel(tr("Running"), "muted", bar);
         status_->setTextFormat(Qt::PlainText);
         barLayout->addWidget(status_, 1);
         layout->addWidget(bar);
@@ -254,6 +256,8 @@ public:
                 ? tr("Process crashed") : tr("Exited with code %1").arg(code));
             runningChanged_(false);
         });
+        detachedPoll_.setInterval(250);
+        connect(&detachedPoll_, &QTimer::timeout, this, [this] { pollDetached(); });
     }
 
     ~RunOutput() override
@@ -266,15 +270,22 @@ public:
     }
 
     void start(const QString &program, const QStringList &arguments, const QString &directory,
-               const QProcessEnvironment &environment)
+               const QProcessEnvironment &environment, bool detached)
     {
-        if (process_.state() != QProcess::NotRunning)
+        if (detachedPid_ > 0)
+            pollDetached();
+        if (process_.state() != QProcess::NotRunning || detachedPid_ > 0)
             return;
         decoder_.resetState();
         escape_ = Escape::Text;
         stopping_ = false;
         output_->clear();
         status_->setText(tr("Starting…"));
+        status_->setToolTip({});
+        if (detached) {
+            startDetached(program, arguments, directory, environment);
+            return;
+        }
         process_.setWorkingDirectory(directory);
         process_.setProcessEnvironment(environment);
         runningChanged_(true);
@@ -283,6 +294,20 @@ public:
 
     void stop()
     {
+        if (detachedPid_ > 0) {
+            if (!sameDetachedProcess()) {
+                finishDetached();
+                return;
+            }
+            stopping_ = true;
+            status_->setText(tr("Stopping…"));
+            const auto group = ::getpgid(detachedPid_);
+            if (group > 1 && group == detachedGroup_ && group != ::getpgrp())
+                ::kill(-group, SIGKILL);
+            else
+                ::kill(detachedPid_, SIGKILL);
+            return;
+        }
         if (process_.state() == QProcess::NotRunning)
             return;
         stopping_ = true;
@@ -296,9 +321,101 @@ public:
 private:
     enum class Escape { Text, Start, Csi, String, StringEnd };
 
+    bool sameDetachedProcess() const
+    {
+        proc_bsdinfo info{};
+        return detachedPid_ > 0
+            && ::proc_pidinfo(detachedPid_, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) == sizeof(info)
+            && (info.pbi_flags & PROC_FLAG_INEXIT) == 0
+            && info.pbi_start_tvsec == detachedStart_.pbi_start_tvsec
+            && info.pbi_start_tvusec == detachedStart_.pbi_start_tvusec;
+    }
+
+    void startDetached(const QString &program, const QStringList &arguments, const QString &directory,
+                       const QProcessEnvironment &environment)
+    {
+        const auto logDirectory = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+            + QStringLiteral("/run-logs");
+        QTemporaryFile log(logDirectory + QStringLiteral("/python-XXXXXX.log"));
+        if (!QDir().mkpath(logDirectory) || !log.open()) {
+            status_->setText(tr("Failed to start"));
+            append(tr("Could not create a log file for the detached process."));
+            return;
+        }
+        const auto logPath = log.fileName();
+        log.close();
+        QProcess launcher;
+        launcher.setProgram(program);
+        launcher.setArguments(arguments);
+        launcher.setWorkingDirectory(directory);
+        launcher.setProcessEnvironment(environment);
+        launcher.setStandardInputFile(QProcess::nullDevice());
+        launcher.setProcessChannelMode(QProcess::MergedChannels);
+        launcher.setStandardOutputFile(logPath);
+        qint64 pid = 0;
+        if (!launcher.startDetached(&pid)) {
+            status_->setText(tr("Failed to start"));
+            append(launcher.errorString());
+            return;
+        }
+        // A regular file keeps stdout/stderr valid after this view and IDE exit.
+        log.setAutoRemove(false);
+        detachedLog_.setFileName(logPath);
+        if (!detachedLog_.open(QIODevice::ReadOnly))
+            append(tr("Could not read log file: %1\n").arg(detachedLog_.errorString()));
+        detachedPid_ = static_cast<pid_t>(pid);
+        detachedGroup_ = ::getpgid(detachedPid_);
+        detachedStart_ = {};
+        ::proc_pidinfo(detachedPid_, PROC_PIDTBSDINFO, 0, &detachedStart_, sizeof(detachedStart_));
+        status_->setText(tr("Detached · PID %1 · continues after VibeIDE closes").arg(pid));
+        status_->setToolTip(tr("Log file: %1").arg(logPath));
+        append(tr("Log file: %1\n").arg(logPath));
+        runningChanged_(true);
+        detachedPoll_.start();
+        pollDetached();
+    }
+
+    void readDetachedOutput()
+    {
+        if (detachedLog_.isOpen()) {
+            // Keep reads bounded so a noisy process cannot stall the UI.
+            constexpr qint64 tailLimit = 500'000;
+            if (detachedLog_.size() - detachedLog_.pos() > tailLimit) {
+                detachedLog_.seek(detachedLog_.size() - tailLimit);
+                decoder_.resetState();
+                escape_ = Escape::Text;
+            }
+            consumeOutput(detachedLog_.read(tailLimit));
+        }
+    }
+
+    void pollDetached()
+    {
+        readDetachedOutput();
+        if (detachedPid_ > 0 && !sameDetachedProcess())
+            finishDetached();
+    }
+
+    void finishDetached()
+    {
+        detachedPoll_.stop();
+        // The process may have written its final bytes after the timer's first read.
+        readDetachedOutput();
+        detachedLog_.close();
+        detachedPid_ = 0;
+        detachedGroup_ = 0;
+        status_->setText(stopping_ ? tr("Process stopped") : tr("Detached process exited"));
+        runningChanged_(false);
+    }
+
     void readOutput()
     {
-        const QString chunk = decoder_(process_.readAllStandardOutput());
+        consumeOutput(process_.readAllStandardOutput());
+    }
+
+    void consumeOutput(const QByteArray &bytes)
+    {
+        const QString chunk = decoder_(bytes);
         QString text;
         text.reserve(chunk.size());
         // Keep escape state between reads so split ANSI sequences do not leak into the log.
@@ -364,6 +481,11 @@ private:
     }
 
     QProcess process_;
+    QTimer detachedPoll_;
+    QFile detachedLog_;
+    pid_t detachedPid_ = 0;
+    pid_t detachedGroup_ = 0;
+    proc_bsdinfo detachedStart_{};
     QStringDecoder decoder_{QStringDecoder::Utf8};
     std::function<void(bool)> runningChanged_;
     Escape escape_ = Escape::Text;
@@ -561,7 +683,7 @@ public:
             connect(runs_, &RunConfigurations::runRequested, this,
                     [this](const QString &program, const QStringList &args,
                            const QString &dir, const QString &title, const QProcessEnvironment &environment,
-                           const QString &configurationId) {
+                           const QString &configurationId, bool detached) {
                 auto *output = runOutputs_.value(configurationId);
                 const auto tabTitle = tr("Run  ·  %1").arg(title);
                 if (!output) {
@@ -583,7 +705,7 @@ public:
                 }
                 terminals_->setTabToolTip(0, title);
                 terminals_->setCurrentWidget(output);
-                output->start(program, args, dir, environment);
+                output->start(program, args, dir, environment, detached);
             });
             connect(runs_, &RunConfigurations::stopRequested, this, [this](const QString &configurationId) {
                 if (auto *output = runOutputs_.value(configurationId)) {
@@ -724,14 +846,14 @@ Workspace::Workspace()
     auto *brand = new QHBoxLayout;
     brand->setContentsMargins(2, 0, 0, 0);
     brand->setSpacing(9);
-    auto *brandIcon = label({}, "brandIcon", sidebar);
+    auto *brandIcon = makeLabel({}, "brandIcon", sidebar);
     brandIcon->setFixedSize(30, 30);
     brandIcon->setPixmap(QApplication::windowIcon().pixmap(brandIcon->size(), devicePixelRatioF()));
     brand->addWidget(brandIcon);
-    brand->addWidget(label(QApplication::applicationDisplayName(), "brand", sidebar), 1);
+    brand->addWidget(makeLabel(QApplication::applicationDisplayName(), "brand", sidebar), 1);
     rail->addLayout(brand);
     rail->addSpacing(18);
-    rail->addWidget(label(tr("PROJECT GROUPS"), "sectionLabel", sidebar));
+    rail->addWidget(makeLabel(tr("PROJECT GROUPS"), "sectionLabel", sidebar));
 
     for (int i = 0; i < GroupCount; ++i) {
         auto *row = new QWidget(sidebar);
@@ -749,7 +871,7 @@ Workspace::Workspace()
         button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         button->setCheckable(true);
         groups_[i] = button;
-        counts_[i] = label("0", "groupCount", row);
+        counts_[i] = makeLabel("0", "groupCount", row);
         counts_[i]->setFixedHeight(20);
         counts_[i]->setAlignment(Qt::AlignCenter);
         auto *addProject = toolButton(tr("+"), tr("Open project in %1").arg(GroupNames.at(i)), row);
@@ -763,7 +885,7 @@ Workspace::Workspace()
         connect(addProject, &QToolButton::clicked, this, [this, i] { openProjectDialog(Group(i)); });
     }
     rail->addSpacing(18);
-    rail->addWidget(label(tr("DATABASES"), "sectionLabel", sidebar));
+    rail->addWidget(makeLabel(tr("DATABASES"), "sectionLabel", sidebar));
     sqliteButton_ = new QPushButton(tr("SQLite"), sidebar);
     sqliteButton_->setObjectName("sqliteButton");
     sqliteButton_->setAccessibleName(tr("SQLite databases"));
@@ -816,10 +938,10 @@ Workspace::Workspace()
     auto *emptyLayout = new QVBoxLayout(empty_);
     emptyLayout->setAlignment(Qt::AlignCenter);
     emptyLayout->setSpacing(11);
-    emptyTitle_ = label({}, "emptyTitle", empty_);
+    emptyTitle_ = makeLabel({}, "emptyTitle", empty_);
     emptyTitle_->setAlignment(Qt::AlignCenter);
     emptyLayout->addWidget(emptyTitle_);
-    auto *emptyBody = label(tr("Choose a project folder to open its Git history and terminal."), "muted", empty_);
+    auto *emptyBody = makeLabel(tr("Choose a project folder to open its Git history and terminal."), "muted", empty_);
     emptyBody->setAlignment(Qt::AlignCenter);
     emptyLayout->addWidget(emptyBody);
     emptyLayout->addSpacing(6);
@@ -836,12 +958,12 @@ Workspace::Workspace()
     footer->setObjectName("footer");
     auto *footerLayout = new QHBoxLayout(footer);
     footerLayout->setContentsMargins(14, 4, 14, 4);
-    activePath_ = label({}, "muted", footer);
+    activePath_ = makeLabel({}, "muted", footer);
     activePath_->setTextFormat(Qt::PlainText);
     activePath_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     activePath_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     footerLayout->addWidget(activePath_, 1);
-    sessionStatus_ = label(tr("Local workspace"), "sessionStatus", footer);
+    sessionStatus_ = makeLabel(tr("Local workspace"), "sessionStatus", footer);
     footerLayout->addWidget(sessionStatus_);
     surfaceLayout->addWidget(footer);
     connect(database_, &DatabasePanel::stateChanged, this, [this] {

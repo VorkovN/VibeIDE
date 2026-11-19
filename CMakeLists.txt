@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(VibeIDE VERSION 0.1.7 LANGUAGES CXX)
+project(VibeIDE VERSION 0.1.8 LANGUAGES CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     message(FATAL_ERROR "VibeIDE requires macOS.")
@@ -43,6 +43,7 @@ qt_add_executable(VibeIDE MACOSX_BUNDLE
     src/GitPanel.cpp
     src/GitSquash.cpp
     src/Pty.cpp
+    src/PythonLaunch.cpp
     src/RunConfigurations.cpp
     src/SqliteReader.cpp
     src/SyntaxHighlighting.cpp

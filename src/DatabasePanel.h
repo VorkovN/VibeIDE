@@ -8,6 +8,7 @@
 
 class DatabaseTableModel;
 class QCheckBox;
+class QComboBox;
 class QLabel;
 class QPushButton;
 class QTableView;
@@ -23,7 +24,7 @@ public:
     explicit DatabasePanel(const QString &initialDirectory, QWidget *parent = nullptr);
     ~DatabasePanel() override;
 
-    void openDatabase(const QString &path);
+    void openDatabase(const QString &path, const QString &name = {});
     void restoreState(const QJsonObject &state);
     QJsonObject saveState() const;
 
@@ -35,6 +36,16 @@ protected:
     void hideEvent(QHideEvent *event) override;
 
 private:
+    struct Connection {
+        QString name;
+        QString path;
+        QString table;
+    };
+
+    QString connectionPath(const QString &path) const;
+    void activateConnection(int index);
+    void rememberCurrentTable();
+    void updateConnections();
     void refresh(bool force = false);
     void startReader();
     void showSnapshot(const SqliteSnapshot &snapshot);
@@ -46,6 +57,7 @@ private:
     const QString initialDirectory_;
     QString path_;
     QString table_;
+    QList<Connection> connections_;
     qint64 offset_ = 0;
     quint64 generation_ = 0;
     bool busy_ = false;
@@ -58,6 +70,7 @@ private:
     SqliteReader *reader_;
     QTimer timer_;
     QCheckBox *autoRefresh_;
+    QComboBox *connectionPicker_;
     QLabel *pathLabel_;
     QLabel *status_;
     QTreeWidget *tables_;

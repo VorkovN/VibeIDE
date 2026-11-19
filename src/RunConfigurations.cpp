@@ -1,5 +1,7 @@
 #include "RunConfigurations.h"
 
+#include "PythonLaunch.h"
+
 #include <QAction>
 #include <QCheckBox>
 #include <QComboBox>
@@ -105,6 +107,8 @@ QJsonObject RunConfigurations::saveState() const
             {QStringLiteral("workingDirectory"), config.workingDirectory},
             {QStringLiteral("arguments"), config.arguments},
             {QStringLiteral("useUv"), config.useUv},
+            {QStringLiteral("launchMode"), config.detached ? QStringLiteral("detached") : QStringLiteral("managed")},
+            {QStringLiteral("applicationName"), config.applicationName},
             {QStringLiteral("environment"), QJsonArray::fromStringList(config.environment)},
         });
     }
@@ -145,6 +149,8 @@ void RunConfigurations::restoreState(const QJsonObject &state)
             .workingDirectory = data.value(QStringLiteral("workingDirectory")).toString(),
             .arguments = data.value(QStringLiteral("arguments")).toString(),
             .useUv = data.value(QStringLiteral("useUv")).toBool(),
+            .detached = !isWeb_ && data.value(QStringLiteral("launchMode")).toString() == QStringLiteral("detached"),
+            .applicationName = data.value(QStringLiteral("applicationName")).toString(),
             .environment = std::move(environment),
         });
         ids.append(id);
@@ -303,6 +309,8 @@ void RunConfigurations::editConfiguration(bool create)
     QLineEdit *workingDirectory = nullptr;
     QLineEdit *arguments = nullptr;
     QCheckBox *useUv = nullptr;
+    QComboBox *launchMode = nullptr;
+    QLineEdit *applicationName = nullptr;
     QPlainTextEdit *environment = nullptr;
     if (isWeb_) {
         entry->setPlaceholderText(tr("Path relative to project root, or absolute path"));
@@ -320,6 +328,19 @@ void RunConfigurations::editConfiguration(bool create)
         arguments = new QLineEdit(config.arguments, &dialog);
         useUv = new QCheckBox(tr("Run with uv using the existing environment"), &dialog);
         useUv->setChecked(config.useUv);
+        launchMode = new QComboBox(&dialog);
+        launchMode->setObjectName(QStringLiteral("pythonLaunchMode"));
+        launchMode->addItem(tr("Managed by IDE"), false);
+        launchMode->addItem(tr("Detached · keep running after IDE closes"), true);
+        launchMode->setCurrentIndex(config.detached ? 1 : 0);
+        applicationName = new QLineEdit(config.applicationName, &dialog);
+        applicationName->setObjectName(QStringLiteral("pythonApplicationName"));
+        applicationName->setToolTip(tr("Name in the macOS Dock. Defaults to the project and configuration names."));
+        const auto updateApplicationName = [this, name, applicationName] {
+            applicationName->setPlaceholderText(QDir(projectRoot_).dirName() + QStringLiteral(" · ") + name->text());
+        };
+        connect(name, &QLineEdit::textChanged, &dialog, updateApplicationName);
+        updateApplicationName();
         environment = new QPlainTextEdit(config.environment.join(QLatin1Char('\n')), &dialog);
         environment->setPlaceholderText(tr("One NAME=value per line"));
         environment->setMaximumHeight(110);
@@ -332,6 +353,8 @@ void RunConfigurations::editConfiguration(bool create)
         form->addRow(entryLabel, entry);
         form->addRow(tr("Working directory"), workingDirectory);
         form->addRow(tr("Arguments"), arguments);
+        form->addRow(tr("Launch mode"), launchMode);
+        form->addRow(tr("Application name"), applicationName);
         form->addRow(useUv);
         form->addRow(tr("Environment variables"), environment);
 
@@ -378,6 +401,8 @@ void RunConfigurations::editConfiguration(bool create)
         config.workingDirectory = workingDirectory->text().trimmed();
         config.arguments = arguments->text();
         config.useUv = useUv->isChecked();
+        config.detached = launchMode->currentData().toBool();
+        config.applicationName = applicationName->text().trimmed();
         config.environment = environment->toPlainText().split(QLatin1Char('\n'), Qt::SkipEmptyParts);
     }
 
@@ -452,7 +477,16 @@ void RunConfigurations::runOrStopSelected()
             return;
         }
 
-        program = commandPath(config->program);
+        const auto applicationName = config->applicationName.isEmpty()
+            ? QDir(projectRoot_).dirName() + QStringLiteral(" · ") + config->name
+            : config->applicationName;
+        QString launchError;
+        program = PythonLaunch::prepare(commandPath(config->program), applicationName,
+                                        projectRoot_ + QLatin1Char(':') + id, environment, launchError);
+        if (program.isEmpty()) {
+            QMessageBox::warning(this, tr("Python launch unavailable"), launchError);
+            return;
+        }
         arguments = QProcess::splitCommand(config->arguments);
         if (config->kind == Kind::PythonScript) {
             arguments.prepend(projectPath(config->entry));
@@ -474,10 +508,11 @@ void RunConfigurations::runOrStopSelected()
     }
 
     const auto title = config->name;
+    const bool detached = !isWeb_ && config->detached;
     recent_.removeAll(id);
     recent_.prepend(id);
     if (recent_.size() > recentLimit)
         recent_.removeLast();
     emit stateChanged();
-    emit runRequested(program, arguments, workingDirectory, title, environment, id);
+    emit runRequested(program, arguments, workingDirectory, title, environment, id, detached);
 }
